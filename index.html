@@ -1,0 +1,776 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#0B0B14" />
+  <title>Reels Lab — Estúdio de Séries &amp; Roteiros Virais</title>
+  <link rel="manifest" href="./manifest.json" />
+  <link rel="icon" type="image/svg+xml" href="./icon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- TOP HEADER -->
+    <header class="topbar">
+      <div class="topbar-left">
+        <button id="mobileMenuBtn" class="icon-btn mobile-only" aria-label="Menu">☰</button>
+        <div class="brand">
+          <div class="brand-logo">▶</div>
+          <div>
+            <div class="brand-name">Reels Lab <span class="badge-pro">STUDIO</span></div>
+            <div class="brand-sub">Modelo de Séries + Código Viral</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="topbar-center">
+        <label class="creator-pill" title="Alternar perfil de criador ativo">
+          <span class="pill-label">Criador Ativo:</span>
+          <select id="activeCreatorSelect" class="creator-select"></select>
+        </label>
+      </div>
+
+      <div class="topbar-right">
+        <button id="openAiModalBtn" class="btn-chip" title="Configurar chave da API Google Gemini">
+          <span id="aiStatusDot" class="dot dot-warn"></span>
+          <span id="aiStatusText">IA: Modo Local</span>
+        </button>
+        <button id="openDriveModalBtn" class="btn-chip" title="Memória, Backup e Conexão Google Drive">
+          <span id="driveStatusDot" class="dot dot-local"></span>
+          <span id="driveStatusText">Memória &amp; Drive</span>
+        </button>
+      </div>
+    </header>
+
+    <div class="workspace">
+      <!-- SIDEBAR NAVIGATION -->
+      <aside id="sidebar" class="sidebar">
+        <nav class="nav-list">
+          <button class="nav-item active" data-tab="tab-factory">
+            <span class="nav-icon">🎬</span>
+            <div>
+              <div class="nav-title">Fábrica de Roteiros</div>
+              <div class="nav-desc">Séries, capas, legendas &amp; IA</div>
+            </div>
+          </button>
+
+          <button class="nav-item" data-tab="tab-radar">
+            <span class="nav-icon">🔥</span>
+            <div>
+              <div class="nav-title">Radar de Trends</div>
+              <div class="nav-desc">Notícias quentes &amp; timing</div>
+            </div>
+          </button>
+
+          <button class="nav-item" data-tab="tab-library">
+            <span class="nav-icon">📁</span>
+            <div>
+              <div class="nav-title">Pastas &amp; 33 Nichos</div>
+              <div class="nav-desc">Histórico e 165 ideias</div>
+            </div>
+          </button>
+
+          <button class="nav-item" data-tab="tab-club">
+            <span class="nav-icon">🔍</span>
+            <div>
+              <div class="nav-title">Clube IA &amp; Teleprompter</div>
+              <div class="nav-desc">Análise 70% + gravação</div>
+            </div>
+          </button>
+
+          <button class="nav-item" data-tab="tab-planner">
+            <span class="nav-icon">📅</span>
+            <div>
+              <div class="nav-title">Planejador &amp; Destrava</div>
+              <div class="nav-desc">Grade Seg–Dom + Guia Extra</div>
+            </div>
+          </button>
+
+          <button class="nav-item" data-tab="tab-creator">
+            <span class="nav-icon">👤</span>
+            <div>
+              <div class="nav-title">DNA do Criador</div>
+              <div class="nav-desc">Perfis, persona &amp; tom de voz</div>
+            </div>
+          </button>
+        </nav>
+
+        <div class="sidebar-footer">
+          <div class="memory-badge">
+            <div><strong>Memória Local Ativa</strong></div>
+            <div class="muted-xs" id="memoryStatsText">Salvamento automático no aparelho</div>
+          </div>
+        </div>
+      </aside>
+
+      <!-- MAIN CONTENT AREA -->
+      <main class="main-content">
+
+        <!-- =========================================================
+             TAB 1: DNA DO CRIADOR (MULTI-PERFIS)
+             ========================================================= -->
+        <section id="tab-creator" class="tab-panel">
+          <div class="section-header">
+            <div>
+              <h1>👤 DNA do Criador &amp; Instruções Gerais</h1>
+              <p>Cadastre quantos perfis quiser (você ou clientes). Tudo que a IA gerar respeitará a persona, as dores e o jeito natural de falar deste perfil.</p>
+            </div>
+            <div class="header-actions">
+              <button id="newCreatorBtn" class="btn btn-secondary">➕ Novo Perfil</button>
+              <button id="deleteCreatorBtn" class="btn btn-danger-outline">🗑️ Excluir</button>
+              <button id="saveCreatorBtn" class="btn btn-primary">💾 Salvar DNA do Perfil</button>
+            </div>
+          </div>
+
+          <div class="card highlight-card">
+            <div class="card-row">
+              <div>
+                <h3>⚡ Preenchimento Rápido pelas 33 Profissões do Guia</h3>
+                <p class="muted-sm">Escolha uma profissão para pré-carregar posicionamento e importar as 5 séries oficiais (com Partes 1, 2 e 3) para sua pasta.</p>
+              </div>
+              <div class="inline-controls">
+                <select id="importProfessionSelect" class="input"></select>
+                <button id="applyProfessionBtn" class="btn btn-gradient">Importar Nicho + 5 Séries</button>
+              </div>
+            </div>
+          </div>
+
+          <form id="creatorForm" class="grid-2">
+            <div class="card">
+              <h3>1. Identidade &amp; Nicho</h3>
+              <div class="form-group">
+                <label>Nome do Criador / Marca</label>
+                <input type="text" id="c_name" class="input" placeholder="Ex: Dra. Laryssa Perez" required />
+              </div>
+              <div class="form-group">
+                <label>@Arroba do Instagram / TikTok</label>
+                <input type="text" id="c_handle" class="input" placeholder="Ex: @seuperfil" />
+              </div>
+              <div class="form-group">
+                <label>Nicho / Profissão Principal</label>
+                <input type="text" id="c_niche" class="input" placeholder="Ex: Nutrição, Advocacia, Estética..." />
+              </div>
+              <div class="form-group">
+                <label>Posicionamento em 1 Frase</label>
+                <textarea id="c_positioning" class="input" rows="2" placeholder="Quem você ajuda e qual transformação entrega?"></textarea>
+              </div>
+              <div class="grid-2-tight">
+                <div class="form-group">
+                  <label>Cor Principal da Capa</label>
+                  <input type="color" id="c_brandColor" class="input color-input" value="#EC4899" />
+                </div>
+                <div class="form-group">
+                  <label>Estilo Visual das Capas IA</label>
+                  <input type="text" id="c_visualStyle" class="input" placeholder="Ex: Minimalista claro, luz natural..." />
+                </div>
+              </div>
+            </div>
+
+            <div class="card">
+              <h3>2. Persona &amp; Público-Alvo</h3>
+              <div class="form-group">
+                <label>Prefixo da Série 03 ("Quem é seu público?")</label>
+                <select id="c_targetGroupPrefix" class="input">
+                  <option value="A mulher que">A mulher que...</option>
+                  <option value="A pessoa que">A pessoa que...</option>
+                  <option value="O homem que">O homem que...</option>
+                  <option value="A mãe que">A mãe que...</option>
+                  <option value="A empreendedora que">A empreendedora que...</option>
+                  <option value="O profissional que">O profissional que...</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Descrição da Persona</label>
+                <textarea id="c_audience" class="input" rows="2" placeholder="Idade, rotina, momento de vida..."></textarea>
+              </div>
+              <div class="form-group">
+                <label>3 Maiores Dores Cotidianas (Situações reais)</label>
+                <textarea id="c_pains" class="input" rows="3" placeholder="Ex: Chega do trabalho sem energia e..."></textarea>
+              </div>
+              <div class="form-group">
+                <label>3 Maiores Desejos Concretos</label>
+                <textarea id="c_desires" class="input" rows="2" placeholder="Ex: Ter resultado sem abrir mão de..."></textarea>
+              </div>
+            </div>
+
+            <div class="card">
+              <h3>3. Voz &amp; Teste da Conversa</h3>
+              <div class="form-group">
+                <label>Pronome de Tratamento</label>
+                <select id="c_pronoun" class="input">
+                  <option value="você">Você (Padrão Brasil)</option>
+                  <option value="tu">Tu (Mais próximo / estilo Leislin)</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Tom de Voz e Jeito de Falar</label>
+                <textarea id="c_tone" class="input" rows="2" placeholder="Ex: Direto, acolhedor, bem-humorado, como amiga no café..."></textarea>
+              </div>
+              <div class="form-group">
+                <label>Palavras Proibidas (Nunca usar — evita "cara de seminário")</label>
+                <textarea id="c_forbiddenWords" class="input" rows="2" placeholder="Ex: oi gente tudo bem, outrossim, adesão, hodiernamente..."></textarea>
+              </div>
+            </div>
+
+            <div class="card">
+              <h3>4. Produto &amp; Conversão (ManyChat / Direct)</h3>
+              <div class="form-group">
+                <label>O que você vende / Próximo passo do funil</label>
+                <textarea id="c_product" class="input" rows="2" placeholder="Ex: Consultoria individual, Curso X, Agenda clínica..."></textarea>
+              </div>
+              <div class="form-group">
+                <label>Objeções que travam o cliente</label>
+                <textarea id="c_objections" class="input" rows="2" placeholder="Ex: 'Não tenho tempo', 'Acho caro'..."></textarea>
+              </div>
+              <div class="form-group">
+                <label>Palavra-chave padrão para comentários (ManyChat / Direct)</label>
+                <input type="text" id="c_manychatKeyword" class="input" placeholder="Ex: QUERO, GUIA, AULA..." />
+              </div>
+            </div>
+          </form>
+        </section>
+
+        <!-- =========================================================
+             TAB 2: RADAR DE TEMAS QUENTES (TIMING + NOTÍCIAS)
+             ========================================================= -->
+        <section id="tab-radar" class="tab-panel">
+          <div class="section-header">
+            <div>
+              <h1>🔥 Radar de Temas Quentes &amp; Timing</h1>
+              <p>Regra do Código Viral: <em>"Comunique algo que já está na cabeça das pessoas — ataque outras bolhas sem sair da sua."</em></p>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="radar-controls">
+              <div class="form-group flex-1">
+                <label>Assunto específico, notícia ou dúvida do WhatsApp para pesquisar/reciclar (opcional)</label>
+                <input type="text" id="radarQueryInput" class="input" placeholder="Ex: nova tendência do momento, preço dos alimentos, IA no trabalho, ou deixe vazio para buscar tendências gerais de hoje..." />
+              </div>
+              <button id="searchTrendsBtn" class="btn btn-gradient btn-lg">
+                <span>🔍 Buscar Notícias &amp; Gerar Ângulos Virais</span>
+              </button>
+            </div>
+          </div>
+
+          <div id="radarStatusBanner" class="info-banner hidden"></div>
+          <div id="radarResults" class="radar-grid"></div>
+          <div id="radarSources" class="sources-box hidden"></div>
+        </section>
+
+        <!-- =========================================================
+             TAB 3: FÁBRICA DE SÉRIES & ROTEIROS VIRAIS
+             ========================================================= -->
+        <section id="tab-factory" class="tab-panel active">
+          <div class="section-header">
+            <div>
+              <h1>🎬 Fábrica de Séries &amp; Roteiros Virais</h1>
+              <p>Gere o pacote completo do episódio: Headline Viral + Roteiro Segundo a Segundo + Capa 9:16 + Legenda + Prompt de Edição IA.</p>
+            </div>
+            <div class="header-actions">
+              <button id="newEpisodeBlankBtn" class="btn btn-secondary">✨ Novo Episódio Limpo</button>
+              <button id="saveEpisodeBtn" class="btn btn-primary">💾 Salvar na Pasta da Série</button>
+            </div>
+          </div>
+
+          <div class="factory-layout">
+            <!-- LEFT: CONFIGURAÇÃO DO EPISÓDIO -->
+            <div class="factory-config card">
+              <h3>⚙️ Estrutura do Episódio</h3>
+
+              <div class="form-group">
+                <label>Pasta da Série</label>
+                <div class="inline-controls">
+                  <select id="f_seriesSelect" class="input flex-1"></select>
+                  <button id="quickNewSeriesBtn" class="btn btn-secondary" title="Criar nova pasta de série">➕ Nova</button>
+                </div>
+              </div>
+
+              <div id="newSeriesBox" class="sub-card hidden">
+                <div class="form-group">
+                  <label>Nome da Nova Série</label>
+                  <input type="text" id="ns_name" class="input" placeholder='Ex: "Como treinar sem academia"' />
+                </div>
+                <div class="form-group">
+                  <label>Modelo Base</label>
+                  <select id="ns_model" class="input"></select>
+                </div>
+                <div class="inline-controls">
+                  <button id="confirmNewSeriesBtn" class="btn btn-primary btn-sm">Criar Pasta</button>
+                  <button id="cancelNewSeriesBtn" class="btn btn-secondary btn-sm">Cancelar</button>
+                </div>
+              </div>
+
+              <div class="grid-2-tight">
+                <div class="form-group">
+                  <label>Modelo de Estrutura</label>
+                  <select id="f_modelSelect" class="input"></select>
+                </div>
+                <div class="form-group">
+                  <label>Número da Parte</label>
+                  <input type="number" id="f_partNumber" class="input" min="1" value="1" />
+                </div>
+              </div>
+
+              <div id="modelRuleHint" class="rule-hint"></div>
+
+              <div class="form-group">
+                <label>Tema / Situação Específica deste Episódio</label>
+                <textarea id="f_topic" class="input" rows="2" placeholder="Ex: A mulher que passa o dia sem comer e ataca a geladeira à noite..."></textarea>
+                <div class="inline-controls mt-6">
+                  <button id="suggestIdeasBtn" class="btn btn-secondary btn-sm">💡 Sugerir 5 Ideias de Partes</button>
+                  <button id="pickViralHookBtn" class="btn btn-secondary btn-sm">🪝 Inserir Gancho Viral</button>
+                </div>
+              </div>
+
+              <div id="ideasSuggestionBox" class="ideas-box hidden"></div>
+
+              <div class="grid-2-tight">
+                <div class="form-group">
+                  <label>Etapa do Funil (Código Viral)</label>
+                  <select id="f_funnelStage" class="input"></select>
+                </div>
+                <div class="form-group">
+                  <label>Objetivo Viral Principal</label>
+                  <select id="f_viralGoal" class="input"></select>
+                </div>
+              </div>
+
+              <details class="pre-questions">
+                <summary>📋 As 3 Perguntas da Leislin (Opcional — refina a entrega)</summary>
+                <div class="form-group mt-8">
+                  <label>1. Qual problema real aborda?</label>
+                  <input type="text" id="f_qProblem" class="input" placeholder="Situação cotidiana vivida pelo público" />
+                </div>
+                <div class="form-group">
+                  <label>2. Qual ÚNICA coisa a pessoa aprende?</label>
+                  <input type="text" id="f_qLearn" class="input" placeholder="1 orientação prática" />
+                </div>
+                <div class="form-group">
+                  <label>3. O que isso muda na vida dela?</label>
+                  <input type="text" id="f_qLifeChange" class="input" placeholder="Benefício concreto" />
+                </div>
+              </details>
+
+              <button id="generateEpisodeBtn" class="btn btn-gradient btn-block btn-lg mt-12">
+                ⚡ Gerar Pacote Completo &amp; Viral
+              </button>
+            </div>
+
+            <!-- RIGHT: PACOTE COMPLETO GERADO -->
+            <div class="factory-output card">
+              <div class="subtabs">
+                <button class="subtab active" data-subtab="out-script">📜 Roteiro &amp; Headlines</button>
+                <button class="subtab" data-subtab="out-cover">🖼️ Capa 9:16 + Headline</button>
+                <button class="subtab" data-subtab="out-caption">✍️ Legenda do Post</button>
+                <button class="subtab" data-subtab="out-edit">✂️ Prompt Edição IA</button>
+              </div>
+
+              <!-- SUBTAB 1: ROTEIRO & HEADLINES -->
+              <div id="out-script" class="subtab-panel active">
+                <div class="grid-2-tight">
+                  <div class="form-group">
+                    <label>Título do Episódio (Organização interna)</label>
+                    <input type="text" id="o_title" class="input" placeholder="Nome do episódio..." />
+                  </div>
+                  <div class="form-group">
+                    <label>Status de Produção</label>
+                    <select id="o_status" class="input">
+                      <option value="ideia">💡 Ideia</option>
+                      <option value="roteiro" selected>📝 Roteiro Pronto</option>
+                      <option value="gravado">🎥 Gravado</option>
+                      <option value="editado">✂️ Editado</option>
+                      <option value="postado">✅ Postado</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="form-group">
+                  <label>📌 Texto Fixo na Tela (Acima da cabeça nos 2 primeiros segundos)</label>
+                  <div class="inline-controls">
+                    <input type="text" id="o_onScreenText" class="input flex-1" placeholder="Nome da série + Parte X" />
+                    <button class="btn btn-secondary btn-sm copy-btn" data-copy="o_onScreenText">Copiar</button>
+                  </div>
+                </div>
+
+                <div class="form-group">
+                  <label>🎯 3 Opções de Headline Viral (Clique para aplicar na Capa 9:16)</label>
+                  <div id="headlinesChips" class="headline-chips"></div>
+                  <input type="text" id="o_selectedHeadline" class="input mt-6" placeholder="Headline selecionada para a capa..." />
+                </div>
+
+                <div class="form-group">
+                  <div class="label-between">
+                    <label>📜 Roteiro Falado Completo (Zero "oi gente")</label>
+                    <span id="scriptTimerBadge" class="badge-pill">~0 palavras • ~0s</span>
+                  </div>
+                  <textarea id="o_script" class="input script-editor" rows="13" placeholder="Seu roteiro completo aparecerá aqui..."></textarea>
+                </div>
+
+                <div class="output-actions">
+                  <button class="btn btn-secondary btn-sm copy-btn" data-copy="o_script">📋 Copiar Roteiro</button>
+                  <button id="sendToTeleprompterBtn" class="btn btn-secondary btn-sm">🎥 Abrir no Teleprompter</button>
+                  <button id="sendToClubBtn" class="btn btn-secondary btn-sm">🔍 Analisar no Clube IA</button>
+                </div>
+              </div>
+
+              <!-- SUBTAB 2: ESTÚDIO DE CAPA 9:16 -->
+              <div id="out-cover" class="subtab-panel">
+                <div class="cover-studio-grid">
+                  <div class="cover-controls">
+                    <div class="form-group">
+                      <label>Headline na Capa</label>
+                      <textarea id="cov_headline" class="input" rows="2" placeholder="Headline curta e curiosa..."></textarea>
+                    </div>
+                    <div class="grid-2-tight">
+                      <div class="form-group">
+                        <label>Selo da Série</label>
+                        <input type="text" id="cov_seriesLabel" class="input" />
+                      </div>
+                      <div class="form-group">
+                        <label>Template do Estúdio</label>
+                        <select id="cov_template" class="input"></select>
+                      </div>
+                    </div>
+
+                    <div class="form-group">
+                      <label>🎨 Prompt para Fundo por IA</label>
+                      <textarea id="o_coverImagePrompt" class="input" rows="3" placeholder="Prompt visual gerado pela IA..."></textarea>
+                      <div class="inline-controls mt-6">
+                        <button id="generateCoverAiBgBtn" class="btn btn-gradient btn-sm">✨ Gerar Fundo com IA</button>
+                        <button class="btn btn-secondary btn-sm copy-btn" data-copy="o_coverImagePrompt">📋 Copiar Prompt</button>
+                      </div>
+                    </div>
+
+                    <div class="form-group">
+                      <label>📷 Ou envie sua própria foto / frame do vídeo</label>
+                      <div class="inline-controls">
+                        <input type="file" id="cov_uploadBg" accept="image/*" class="input-file" />
+                        <button id="cov_clearBgBtn" class="btn btn-secondary btn-sm">Usar Fundo Estúdio</button>
+                      </div>
+                    </div>
+
+                    <label class="checkbox-row">
+                      <input type="checkbox" id="cov_safeZoneToggle" checked />
+                      <span>Mostrar guia Área Segura do Feed (4:5)</span>
+                    </label>
+
+                    <div class="inline-controls mt-12">
+                      <button id="downloadCoverBtn" class="btn btn-primary">⬇️ Baixar Capa PNG (1080×1920)</button>
+                    </div>
+                  </div>
+
+                  <div class="cover-preview-wrap">
+                    <div class="phone-frame">
+                      <canvas id="coverCanvas"></canvas>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- SUBTAB 3: LEGENDA DO POST -->
+              <div id="out-caption" class="subtab-panel">
+                <div class="form-group">
+                  <div class="label-between">
+                    <label>✍️ Legenda Estratégica Pronta</label>
+                    <button class="btn btn-secondary btn-sm copy-btn" data-copy="o_caption">📋 Copiar Legenda</button>
+                  </div>
+                  <textarea id="o_caption" class="input" rows="14" placeholder="A legenda estratégica com gancho, valor e CTA aparecerá aqui..."></textarea>
+                </div>
+                <div class="tip-box">
+                  💡 <strong>Dica do Código Viral:</strong> Responda todos os comentários na <strong>primeira hora</strong> após postar sempre finalizando sua resposta com uma <strong>PERGUNTA</strong> para multiplicar o alcance.
+                </div>
+              </div>
+
+              <!-- SUBTAB 4: PROMPT DE EDIÇÃO IA -->
+              <div id="out-edit" class="subtab-panel">
+                <div class="form-group">
+                  <div class="label-between">
+                    <label>✂️ Prompt de Direção &amp; Edição com IA (CapCut AI / Editores)</label>
+                    <button class="btn btn-secondary btn-sm copy-btn" data-copy="o_editingPrompt">📋 Copiar Prompt de Edição</button>
+                  </div>
+                  <textarea id="o_editingPrompt" class="input" rows="14" placeholder="Instruções detalhadas segundo a segundo para edição com IA..."></textarea>
+                </div>
+                <div class="tip-box">
+                  ✂️ <strong>Regra 3 em 1 (Código Viral):</strong> Ao postar no Instagram, TikTok e Shorts, baixe sem marca d'água e faça um micro-corte ou ajuste para quebrar os metadados entre plataformas.
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- =========================================================
+             TAB 4: CLUBE DE ANÁLISE IA & TELEPROMPTER
+             ========================================================= -->
+        <section id="tab-club" class="tab-panel">
+          <div class="section-header">
+            <div>
+              <h1>🔍 Clube de Análise IA &amp; 🎥 Teleprompter</h1>
+              <p>Avalie qualquer roteiro antes de gravar (Filtro 70% + Extra 3 da Leislin) e grave olhando direto na altura da câmera.</p>
+            </div>
+          </div>
+
+          <div class="grid-2">
+            <!-- CLUBE DE ANÁLISE -->
+            <div class="card">
+              <h3>🔍 Clube de Análise de Reels IA</h3>
+              <div class="form-group">
+                <label>Cole ou edite seu roteiro aqui para avaliação</label>
+                <textarea id="club_scriptInput" class="input" rows="9" placeholder="Cole qualquer roteiro ou traga direto da Fábrica de Roteiros..."></textarea>
+              </div>
+              <div class="inline-controls">
+                <button id="runClubAnalysisBtn" class="btn btn-gradient">🔎 Analisar Roteiro Agora</button>
+                <button id="loadLastEpisodeClubBtn" class="btn btn-secondary">📥 Puxar da Fábrica</button>
+              </div>
+
+              <div id="clubResultBox" class="club-results hidden mt-12">
+                <div class="score-banner">
+                  <div class="score-circle" id="clubScoreValue">0%</div>
+                  <div>
+                    <div id="clubScoreBadge" class="badge-pill">Filtro 70%</div>
+                    <p id="clubVerdict" class="mt-6"></p>
+                  </div>
+                </div>
+                <div class="analysis-block keep">
+                  <strong>✓ O que manter</strong>
+                  <ul id="clubKeepList"></ul>
+                </div>
+                <div class="analysis-block adjust">
+                  <strong>↻ O que ajustar</strong>
+                  <ul id="clubAdjustList"></ul>
+                </div>
+                <div class="analysis-block blocker">
+                  <strong>✗ O que está impedindo de crescer</strong>
+                  <ul id="clubBlockerList"></ul>
+                </div>
+                <div class="mt-12">
+                  <button id="applyClubFixBtn" class="btn btn-primary btn-block">✨ Aplicar Roteiro Otimizado na Fábrica &amp; Teleprompter</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- TELEPROMPTER & CHECKLIST -->
+            <div class="card">
+              <h3>🎥 Modo Teleprompter (Gravação)</h3>
+              <p class="muted-sm">Posicione o texto bem no topo da tela perto da lente para manter contato visual natural (na altura dos olhos).</p>
+
+              <div class="tp-controls">
+                <button id="tpPlayBtn" class="btn btn-primary">▶ Iniciar Rolagem</button>
+                <button id="tpResetBtn" class="btn btn-secondary">↺ Reiniciar</button>
+                <button id="tpFullscreenBtn" class="btn btn-gradient">⛶ Tela Cheia</button>
+              </div>
+
+              <div class="tp-sliders">
+                <label>Velocidade: <span id="tpSpeedVal">2</span>
+                  <input type="range" id="tpSpeed" min="1" max="8" step="0.5" value="2" />
+                </label>
+                <label>Tamanho Fonte: <span id="tpSizeVal">28</span>px
+                  <input type="range" id="tpFontSize" min="18" max="54" step="2" value="28" />
+                </label>
+                <label class="checkbox-row">
+                  <input type="checkbox" id="tpMirror" />
+                  <span>Espelhar Texto</span>
+                </label>
+              </div>
+
+              <div id="tpViewport" class="tp-viewport">
+                <div class="tp-guide-line"></div>
+                <div id="tpContent" class="tp-content">Carregue um roteiro da Fábrica ou escreva no campo ao lado para ler no Teleprompter...</div>
+              </div>
+
+              <div class="checklist-box mt-12">
+                <h4>✅ Checklist Pré-Gravação (O Meu Modelo de Reels)</h4>
+                <div id="preRecordChecklist"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- =========================================================
+             TAB 5: PASTAS DE SÉRIES, HISTÓRICO & CATÁLOGO 33 PROFISSÕES
+             ========================================================= -->
+        <section id="tab-library" class="tab-panel">
+          <div class="section-header">
+            <div>
+              <h1>📁 Pastas de Séries &amp; Catálogo Oficial</h1>
+              <p>Acompanhe cada série rumo às <strong>15 partes de consistência</strong> e explore todas as <strong>33 profissões (165 ideias)</strong>.</p>
+            </div>
+          </div>
+
+          <div class="subtabs mb-16">
+            <button class="subtab active" data-subtab="lib-folders">📂 Minhas Pastas de Séries</button>
+            <button class="subtab" data-subtab="lib-catalog">📚 Catálogo 33 Profissões (165 Ideias)</button>
+          </div>
+
+          <!-- MINHAS PASTAS -->
+          <div id="lib-folders" class="subtab-panel active">
+            <div id="seriesFoldersGrid" class="series-grid"></div>
+            <div id="seriesDetailPanel" class="card mt-16 hidden"></div>
+          </div>
+
+          <!-- CATÁLOGO 33 PROFISSÕES -->
+          <div id="lib-catalog" class="subtab-panel">
+            <div class="card mb-16">
+              <div class="inline-controls">
+                <input type="text" id="catalogSearchInput" class="input flex-1" placeholder="Buscar profissão ou ideia (ex: nutrição, advogado, estética, renda, filhos)..." />
+                <select id="catalogCategoryFilter" class="input">
+                  <option value="">Todas as Categorias</option>
+                  <option value="Saúde e Corpo">Saúde e Corpo</option>
+                  <option value="Beleza e Estilo">Beleza e Estilo</option>
+                  <option value="Direito e Finanças">Direito e Finanças</option>
+                  <option value="Casa e Imóveis">Casa e Imóveis</option>
+                  <option value="Negócios e Serviços">Negócios e Serviços</option>
+                  <option value="Educação e Família">Educação e Família</option>
+                </select>
+              </div>
+            </div>
+            <div id="catalogGrid" class="catalog-grid"></div>
+          </div>
+        </section>
+
+        <!-- =========================================================
+             TAB 6: PLANEJADOR SEMANAL & GUIA DESTRAVA (EXTRA 1)
+             ========================================================= -->
+        <section id="tab-planner" class="tab-panel">
+          <div class="section-header">
+            <div>
+              <h1>📅 Planejador Semanal &amp; Guia Destrava</h1>
+              <p>Alterne suas séries ativas durante a semana (Série A / Série B / Série C) e consulte o FAQ completo para nunca travar.</p>
+            </div>
+          </div>
+
+          <div class="card mb-16">
+            <div class="label-between mb-12">
+              <div>
+                <h3>🗓️ Grade Semanal de Séries (Constância: 4 a 7 Reels/semana)</h3>
+                <p class="muted-sm">Melhores janelas sugeridas pelo Código Viral: <strong>09h–11h</strong>, <strong>12h–13h</strong> e <strong>18h–19h30</strong>.</p>
+              </div>
+              <button id="saveScheduleBtn" class="btn btn-primary btn-sm">💾 Salvar Grade</button>
+            </div>
+            <div id="weeklyGrid" class="weekly-grid"></div>
+          </div>
+
+          <div class="card">
+            <h3>🧠 Guia Destrava — As 14 Travas Mais Comuns (Extra 1 do Modelo de Reels)</h3>
+            <p class="muted-sm mb-12">Clique na trava que você está sentindo hoje para ver o diagnóstico real e o plano de ação imediato.</p>
+            <div id="faqAccordion" class="faq-list"></div>
+          </div>
+        </section>
+
+      </main>
+    </div>
+  </div>
+
+  <!-- MODAL: CONFIGURAR IA GEMINI -->
+  <div id="aiModal" class="modal hidden">
+    <div class="modal-backdrop" data-close="aiModal"></div>
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>🤖 Configurar Google Gemini API</h3>
+        <button class="icon-btn" data-close="aiModal">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="muted-sm">A chave fica salva <strong>somente na memória do seu navegador</strong> e nunca é enviada para terceiros além da API oficial do Google.</p>
+        <div class="info-banner mt-12">
+          <strong>Como conseguir gratuitamente em 1 minuto:</strong><br/>
+          Acesse <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>, faça login com sua conta Google, clique em <em>Create API key</em> e cole abaixo.
+        </div>
+        <div class="form-group mt-12">
+          <label>Sua Gemini API Key</label>
+          <input type="password" id="m_geminiKey" class="input" placeholder="AIzaSy..." />
+        </div>
+        <div class="form-group">
+          <label>Modelo Preferido</label>
+          <select id="m_geminiModel" class="input">
+            <option value="gemini-2.5-flash">Gemini 2.5 Flash (Recomendado — Rápido + Busca Google)</option>
+            <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
+          </select>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" data-close="aiModal">Fechar</button>
+        <button id="saveAiSettingsBtn" class="btn btn-primary">Salvar Chave IA</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: MEMÓRIA & GOOGLE DRIVE -->
+  <div id="driveModal" class="modal hidden">
+    <div class="modal-backdrop" data-close="driveModal"></div>
+    <div class="modal-card modal-lg">
+      <div class="modal-header">
+        <h3>☁️ Memória Permanente, Backup &amp; Google Drive</h3>
+        <button class="icon-btn" data-close="driveModal">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="grid-2">
+          <div class="sub-card">
+            <h4>💾 1. Memória Automática + Arquivo de Backup</h4>
+            <p class="muted-sm">Tudo já é salvo automaticamente neste navegador (IndexedDB). Use os botões abaixo para baixar ou restaurar um backup completo entre aparelhos:</p>
+            <div class="inline-controls mt-12">
+              <button id="exportBackupBtn" class="btn btn-secondary">⬇️ Exportar Backup (.json)</button>
+              <label class="btn btn-secondary">
+                ⬆️ Restaurar Backup
+                <input type="file" id="importBackupInput" accept=".json" hidden />
+              </label>
+            </div>
+          </div>
+
+          <div class="sub-card">
+            <h4>☁️ 2. Sincronização Gratuita com seu Google Drive</h4>
+            <p class="muted-sm">Cria automaticamente uma pasta <code>Reels Lab - Studio</code> no seu Drive com subpastas por Criador e Série (<code>.txt</code> + <code>.png</code> + banco JSON).</p>
+            <div class="form-group mt-8">
+              <label>URL do App da Web (Google Apps Script)</label>
+              <input type="url" id="m_driveUrl" class="input" placeholder="https://script.google.com/macros/s/.../exec" />
+            </div>
+            <div class="inline-controls">
+              <button id="syncDriveNowBtn" class="btn btn-gradient btn-sm">☁️ Salvar no Drive Agora</button>
+              <button id="loadDriveNowBtn" class="btn btn-secondary btn-sm">📥 Puxar do Drive</button>
+            </div>
+            <div id="driveLastSyncInfo" class="muted-xs mt-8"></div>
+          </div>
+        </div>
+
+        <details class="mt-12">
+          <summary>📖 Passo a passo (2 minutos) para gerar sua URL gratuita no Google Drive</summary>
+          <ol class="steps-list">
+            <li>Acesse <a href="https://script.google.com" target="_blank" rel="noopener">script.google.com</a> logado na sua conta Google e clique em <strong>Novo projeto</strong>.</li>
+            <li>Apague o código padrão, clique no botão abaixo para copiar o script conector do Reels Lab e cole lá dentro.</li>
+            <li>Clique em <strong>Implantar → Nova implantação</strong>, escolha tipo <strong>App da Web</strong>, "Executar como: <strong>Eu</strong>" e "Quem pode acessar: <strong>Qualquer pessoa</strong>".</li>
+            <li>Autorize o acesso ao seu Drive, copie a URL gerada e cole no campo acima!</li>
+          </ol>
+          <button id="copyAppsScriptBtn" class="btn btn-secondary btn-sm">📋 Copiar Código do Google Apps Script</button>
+        </details>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" data-close="driveModal">Fechar</button>
+        <button id="saveDriveUrlBtn" class="btn btn-primary">Salvar URL do Drive</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: TELEPROMPTER TELA CHEIA -->
+  <div id="tpFullscreenModal" class="tp-fullscreen hidden">
+    <div class="tp-fs-bar">
+      <div class="inline-controls">
+        <button id="tpFsPlayBtn" class="btn btn-primary btn-sm">▶ Play / Pause</button>
+        <button id="tpFsResetBtn" class="btn btn-secondary btn-sm">↺ Topo</button>
+        <label class="fs-slider">Vel <input type="range" id="tpFsSpeed" min="1" max="8" step="0.5" value="2" /></label>
+      </div>
+      <button id="closeTpFsBtn" class="btn btn-danger-outline btn-sm">✕ Sair da Tela Cheia</button>
+    </div>
+    <div class="tp-fs-guide"></div>
+    <div id="tpFsViewport" class="tp-fs-viewport">
+      <div id="tpFsContent" class="tp-fs-content"></div>
+    </div>
+  </div>
+
+  <div id="toastContainer" class="toast-container"></div>
+
+  <script type="module" src="./js/app.js"></script>
+</body>
+</html>
