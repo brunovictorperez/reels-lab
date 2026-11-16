@@ -8,9 +8,11 @@ const WIDTH = 1080;
 const HEIGHT = 1920;
 
 export const COVER_TEMPLATES = [
-  { id: 'gradient_glow', name: 'Studio Viral Glow' },
+  { id: 'apple_light', name: 'Apple Minimal White (Serif & Bold)' },
+  { id: 'apple_dark', name: 'Apple Minimal Black (Serif & Bold)' },
+  { id: 'gradient_glow', name: 'Studio Soft Glass' },
   { id: 'editorial_dark', name: 'Editorial Dark Contraste' },
-  { id: 'sunset_mesh', name: 'Pôr do Sol Reels' },
+  { id: 'sunset_mesh', name: 'Soft Pastel Aurora' },
   { id: 'magazine_frame', name: 'Capa Revista Bold' }
 ];
 
@@ -61,6 +63,62 @@ function wrapHeadlineLines(ctx, text, maxWidth) {
 
 function drawProceduralBg(ctx, templateId, accentColor) {
   const accent = accentColor || '#EC4899';
+
+  if (templateId === 'apple_light') {
+    const base = ctx.createLinearGradient(0, 0, WIDTH, HEIGHT);
+    base.addColorStop(0, '#FFFFFF');
+    base.addColorStop(0.55, '#F5F5F7');
+    base.addColorStop(1, '#EFEFF4');
+    ctx.fillStyle = base;
+    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+    const orb1 = ctx.createRadialGradient(WIDTH * 0.18, HEIGHT * 0.22, 20, WIDTH * 0.18, HEIGHT * 0.22, 620);
+    orb1.addColorStop(0, 'rgba(167, 139, 250, 0.22)');
+    orb1.addColorStop(1, 'rgba(255, 255, 255, 0)');
+    ctx.fillStyle = orb1;
+    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+    const orb2 = ctx.createRadialGradient(WIDTH * 0.85, HEIGHT * 0.78, 20, WIDTH * 0.85, HEIGHT * 0.78, 660);
+    orb2.addColorStop(0, 'rgba(56, 189, 248, 0.18)');
+    orb2.addColorStop(1, 'rgba(255, 255, 255, 0)');
+    ctx.fillStyle = orb2;
+    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+    // Subtle glass frame
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.56)';
+    ctx.strokeStyle = 'rgba(29, 29, 31, 0.08)';
+    ctx.lineWidth = 3;
+    drawRoundedRect(ctx, 56, 330, WIDTH - 112, HEIGHT - 660, 56);
+    ctx.fill();
+    ctx.stroke();
+    return;
+  }
+
+  if (templateId === 'apple_dark') {
+    ctx.fillStyle = '#050507';
+    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+    const orb1 = ctx.createRadialGradient(WIDTH * 0.2, HEIGHT * 0.24, 20, WIDTH * 0.2, HEIGHT * 0.24, 650);
+    orb1.addColorStop(0, 'rgba(139, 92, 246, 0.22)');
+    orb1.addColorStop(1, 'rgba(5, 5, 7, 0)');
+    ctx.fillStyle = orb1;
+    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+    const orb2 = ctx.createRadialGradient(WIDTH * 0.82, HEIGHT * 0.76, 20, WIDTH * 0.82, HEIGHT * 0.76, 680);
+    orb2.addColorStop(0, 'rgba(56, 189, 248, 0.16)');
+    orb2.addColorStop(1, 'rgba(5, 5, 7, 0)');
+    ctx.fillStyle = orb2;
+    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+    // Subtle dark frosted glass frame
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.04)';
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.14)';
+    ctx.lineWidth = 2.5;
+    drawRoundedRect(ctx, 56, 330, WIDTH - 112, HEIGHT - 660, 56);
+    ctx.fill();
+    ctx.stroke();
+    return;
+  }
 
   if (templateId === 'editorial_dark') {
     ctx.fillStyle = '#09090F';
@@ -157,10 +215,13 @@ export async function renderCoverCanvas(canvas, options = {}) {
     partNumber = 1,
     handle = '@seuperfil',
     accentColor = '#EC4899',
-    templateId = 'gradient_glow',
+    templateId = 'apple_light',
     bgDataUrl = '',
     showSafeZone = false
   } = options;
+
+  const isLightTheme = !bgDataUrl && templateId === 'apple_light';
+  const isAppleStyle = templateId === 'apple_light' || templateId === 'apple_dark';
 
   canvas.width = WIDTH;
   canvas.height = HEIGHT;
@@ -198,48 +259,66 @@ export async function renderCoverCanvas(canvas, options = {}) {
 
   // 2. Top Series Pill inside Safe Zone
   const pillText = `${String(seriesName || 'SÉRIE').toUpperCase().slice(0, 32)}  •  PARTE ${partNumber || 1}`;
-  ctx.font = '800 32px Inter, -apple-system, BlinkMacSystemFont, sans-serif';
+  ctx.font = '600 28px Inter, -apple-system, BlinkMacSystemFont, sans-serif';
   const pillWidth = Math.min(ctx.measureText(pillText).width + 76, WIDTH - 140);
   const pillX = (WIDTH - pillWidth) / 2;
-  const pillY = feedTop + 140;
-
-  const pillGrad = ctx.createLinearGradient(pillX, pillY, pillX + pillWidth, pillY);
-  pillGrad.addColorStop(0, '#FF6B35');
-  pillGrad.addColorStop(0.5, accentColor || '#EC4899');
-  pillGrad.addColorStop(1, '#8B5CF6');
+  const pillY = feedTop + 145;
 
   ctx.save();
-  ctx.shadowColor = 'rgba(0,0,0,0.45)';
-  ctx.shadowBlur = 24;
-  drawRoundedRect(ctx, pillX, pillY, pillWidth, 74, 37);
-  ctx.fillStyle = pillGrad;
-  ctx.fill();
+  if (isLightTheme) {
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+    ctx.strokeStyle = 'rgba(29, 29, 31, 0.14)';
+    ctx.lineWidth = 2.5;
+    drawRoundedRect(ctx, pillX, pillY, pillWidth, 68, 34);
+    ctx.fill();
+    ctx.stroke();
+  } else if (isAppleStyle) {
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.12)';
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.24)';
+    ctx.lineWidth = 2.5;
+    drawRoundedRect(ctx, pillX, pillY, pillWidth, 68, 34);
+    ctx.fill();
+    ctx.stroke();
+  } else {
+    const pillGrad = ctx.createLinearGradient(pillX, pillY, pillX + pillWidth, pillY);
+    pillGrad.addColorStop(0, '#FF6B35');
+    pillGrad.addColorStop(0.5, accentColor || '#EC4899');
+    pillGrad.addColorStop(1, '#8B5CF6');
+    ctx.shadowColor = 'rgba(0,0,0,0.45)';
+    ctx.shadowBlur = 24;
+    drawRoundedRect(ctx, pillX, pillY, pillWidth, 74, 37);
+    ctx.fillStyle = pillGrad;
+    ctx.fill();
+  }
   ctx.restore();
 
-  ctx.fillStyle = '#FFFFFF';
+  ctx.fillStyle = isLightTheme ? '#1D1D1F' : '#FFFFFF';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText(pillText, WIDTH / 2, pillY + 38, pillWidth - 40);
+  ctx.fillText(pillText, WIDTH / 2, pillY + (isAppleStyle ? 35 : 38), pillWidth - 40);
 
   // 3. Main Viral Headline (centered inside 4:5 Feed Safe Area)
   const cleanHeadline = String(headline || '').trim();
-  const maxTextWidth = WIDTH - 160;
-  let fontSize = cleanHeadline.length > 55 ? 74 : cleanHeadline.length > 36 ? 88 : 100;
-  ctx.font = `900 ${fontSize}px Inter, -apple-system, BlinkMacSystemFont, sans-serif`;
+  const maxTextWidth = WIDTH - 170;
+  let fontSize = cleanHeadline.length > 55 ? 72 : cleanHeadline.length > 36 ? 84 : 96;
+  const sansFont = (sz, w = 700) => `${w} ${sz}px Inter, -apple-system, BlinkMacSystemFont, sans-serif`;
+  const serifItalicFont = (sz) => `italic 400 ${Math.round(sz * 1.1)}px "Instrument Serif", "Playfair Display", Georgia, serif`;
+
+  ctx.font = sansFont(fontSize, isAppleStyle ? 700 : 900);
 
   let lines = wrapHeadlineLines(ctx, cleanHeadline, maxTextWidth);
-  while (lines.length > 5 && fontSize > 54) {
+  while (lines.length > 5 && fontSize > 52) {
     fontSize -= 6;
-    ctx.font = `900 ${fontSize}px Inter, -apple-system, BlinkMacSystemFont, sans-serif`;
+    ctx.font = sansFont(fontSize, isAppleStyle ? 700 : 900);
     lines = wrapHeadlineLines(ctx, cleanHeadline, maxTextWidth);
   }
 
-  const lineHeight = fontSize * 1.16;
+  const lineHeight = fontSize * 1.18;
   const blockHeight = lines.length * lineHeight;
   let startY = (HEIGHT / 2) - (blockHeight / 2) + 20;
 
   // Background highlight card behind headline if editorial or bg photo
-  if (templateId === 'editorial_dark' || bgDataUrl) {
+  if ((templateId === 'editorial_dark' || bgDataUrl) && !isAppleStyle) {
     ctx.save();
     ctx.fillStyle = 'rgba(11, 11, 20, 0.56)';
     drawRoundedRect(ctx, 64, startY - 56, WIDTH - 128, blockHeight + 92, 40);
@@ -255,36 +334,53 @@ export async function renderCoverCanvas(canvas, options = {}) {
 
   lines.forEach((line, idx) => {
     const words = line.split(' ');
-    const lineWidth = ctx.measureText(line).width;
-    let cursorX = (WIDTH - lineWidth) / 2;
     const y = startY + idx * lineHeight;
 
-    words.forEach((word, wIdx) => {
+    // Pre-measure mixed sans/serif-italic line width for crisp centering
+    const measured = words.map((word, wIdx) => {
       const normalized = word.toLowerCase().replace(/[^a-záéíóúâêôãõç]/gi, '');
       const isPower = POWER_HIGHLIGHTS.has(normalized) || (word === word.toUpperCase() && word.length >= 4);
+      const font = isPower ? serifItalicFont(fontSize) : sansFont(fontSize, isAppleStyle ? 700 : 900);
+      ctx.font = font;
+      const wWidth = ctx.measureText(word + (wIdx < words.length - 1 ? ' ' : '')).width;
+      return { word, isPower, font, wWidth };
+    });
 
+    const totalLineWidth = measured.reduce((acc, item) => acc + item.wWidth, 0);
+    let cursorX = (WIDTH - totalLineWidth) / 2;
+
+    measured.forEach((item) => {
       ctx.save();
-      ctx.shadowColor = 'rgba(0,0,0,0.72)';
-      ctx.shadowBlur = 18;
-      ctx.shadowOffsetY = 6;
-      ctx.fillStyle = isPower ? '#FDE047' : '#FFFFFF';
-      ctx.fillText(word, cursorX, y);
+      ctx.font = item.font;
+      if (!isLightTheme) {
+        ctx.shadowColor = 'rgba(0,0,0,0.45)';
+        ctx.shadowBlur = 14;
+        ctx.shadowOffsetY = 4;
+      }
+      if (isLightTheme) {
+        ctx.fillStyle = item.isPower ? '#5B21B6' : '#1D1D1F';
+      } else if (isAppleStyle) {
+        ctx.fillStyle = item.isPower ? '#DDD6FE' : '#F5F5F7';
+      } else {
+        ctx.fillStyle = item.isPower ? '#FDE047' : '#FFFFFF';
+      }
+      ctx.fillText(item.word, cursorX, item.isPower ? y - fontSize * 0.04 : y);
       ctx.restore();
 
-      cursorX += ctx.measureText(word + (wIdx < words.length - 1 ? ' ' : '')).width;
+      cursorX += item.wWidth;
     });
   });
 
   // 4. Bottom Handle & Swipe/Watch Cue inside 4:5 safe zone
   const footerY = feedBottom - 165;
-  ctx.fillStyle = 'rgba(255,255,255,0.88)';
-  ctx.font = '700 34px Inter, -apple-system, BlinkMacSystemFont, sans-serif';
+  ctx.fillStyle = isLightTheme ? 'rgba(29, 29, 31, 0.88)' : 'rgba(255,255,255,0.88)';
+  ctx.font = '600 32px Inter, -apple-system, BlinkMacSystemFont, sans-serif';
   ctx.textAlign = 'center';
   ctx.fillText(handle || '@seuperfil', WIDTH / 2, footerY);
 
-  ctx.fillStyle = 'rgba(255,255,255,0.58)';
-  ctx.font = '600 24px Inter, -apple-system, BlinkMacSystemFont, sans-serif';
-  ctx.fillText('▶ ASSISTA ATÉ O FINAL', WIDTH / 2, footerY + 52);
+  ctx.fillStyle = isLightTheme ? 'rgba(29, 29, 31, 0.55)' : 'rgba(255,255,255,0.58)';
+  ctx.font = 'italic 400 28px "Instrument Serif", Georgia, serif';
+  ctx.fillText('assista até o final', WIDTH / 2, footerY + 50);
 
   // 5. Optional Safe Zone Guide Overlay (hidden on PNG export)
   if (showSafeZone) {

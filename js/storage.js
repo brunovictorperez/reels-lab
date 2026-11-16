@@ -21,10 +21,11 @@ export function createDefaultState() {
   const serie2Id = 'serie_default_2';
 
   return {
-    version: 1,
+    version: 2,
     settings: {
       geminiKey: '',
-      geminiModel: 'gemini-2.5-flash',
+      geminiModel: 'gemini-3.8-flash',
+      theme: 'light',
       driveWebhookUrl: '',
       lastDriveSync: null,
       driveFolderUrl: ''
@@ -178,10 +179,19 @@ export async function loadState() {
 
 function mergeDefaults(loaded) {
   const def = createDefaultState();
+  const mergedSettings = { ...def.settings, ...(loaded.settings || {}) };
+  // Migrate deprecated/legacy Gemini model IDs saved in browser storage
+  if (!mergedSettings.geminiModel || /gemini-2\.(0|5)-flash/i.test(mergedSettings.geminiModel)) {
+    mergedSettings.geminiModel = 'gemini-3.8-flash';
+  }
+  if (mergedSettings.theme !== 'light' && mergedSettings.theme !== 'dark') {
+    mergedSettings.theme = 'light';
+  }
+
   return {
     ...def,
     ...loaded,
-    settings: { ...def.settings, ...(loaded.settings || {}) },
+    settings: mergedSettings,
     creators: Array.isArray(loaded.creators) && loaded.creators.length ? loaded.creators : def.creators,
     series: Array.isArray(loaded.series) ? loaded.series : def.series,
     episodes: Array.isArray(loaded.episodes) ? loaded.episodes : def.episodes,

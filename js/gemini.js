@@ -40,12 +40,13 @@ function cleanJsonResponse(text) {
   return JSON.parse(cleaned.slice(start, end + 1));
 }
 
-async function callGemini({ apiKey, modelName = 'gemini-2.5-flash', prompt, systemInstruction = '', useSearch = false, expectJson = true }) {
+async function callGemini({ apiKey, modelName = 'gemini-3.8-flash', prompt, systemInstruction = '', useSearch = false, expectJson = true }) {
   if (!apiKey) {
     throw new Error('NO_API_KEY');
   }
 
-  const modelsToTry = [modelName, 'gemini-2.5-flash', 'gemini-2.0-flash'].filter((v, i, a) => v && a.indexOf(v) === i);
+  const sanitizedPreferred = (!modelName || modelName === 'gemini-2.0-flash') ? 'gemini-3.8-flash' : modelName;
+  const modelsToTry = [sanitizedPreferred, 'gemini-3.8-flash', 'gemini-3.8-pro', 'gemini-2.5-flash'].filter((v, i, a) => v && a.indexOf(v) === i);
   let lastError = null;
 
   for (const model of modelsToTry) {
@@ -75,12 +76,18 @@ async function callGemini({ apiKey, modelName = 'gemini-2.5-flash', prompt, syst
       const data = await res.json();
       if (!res.ok) {
         const msg = data?.error?.message || `HTTP ${res.status}`;
-        // If search tool is unsupported on a model/tier, retry without search if possible
+        // If search tool is unsupported on a model/tier, let caller handle fallback or try next model
         if (useSearch && /search|tool/i.test(msg)) {
           lastError = new Error(msg);
           continue;
         }
-        throw new Error(msg);
+        // Only fall back to secondary models when the model itself is unavailable/deprecated/not found
+        if (/not found|no longer available|deprecated|not supported|404/i.test(msg) || res.status === 404) {
+          lastError = new Error(msg);
+          continue;
+        }
+        // Fail fast on auth, billing, quota or validation errors so user sees the exact reason
+        throw Object.assign(new Error(msg), { fatal: true });
       }
 
       const candidate = data?.candidates?.[0];
@@ -93,6 +100,7 @@ async function callGemini({ apiKey, modelName = 'gemini-2.5-flash', prompt, syst
       return { text, modelUsed: model, sources };
     } catch (err) {
       lastError = err;
+      if (err?.fatal) break;
     }
   }
 
@@ -525,7 +533,7 @@ export async function generateCoverBackground({ imagePrompt, apiKey }) {
   } catch (_) {}
 
   // 2. Fallback to Gemini multimodal image generation models
-  const imgModels = ['gemini-2.0-flash-exp-image-generation', 'gemini-2.5-flash-image'];
+  const imgModels = ['gemini-3.8-flash', 'gemini-2.5-flash-image'];
   for (const m of imgModels) {
     try {
       const res = await fetch(`${BASE_URL}/${m}:generateContent?key=${encodeURIComponent(apiKey)}`, {
@@ -553,4 +561,140 @@ export async function generateCoverBackground({ imagePrompt, apiKey }) {
   }
 
   throw new Error('Seu plano/região da chave Gemini não habilitou geração de imagem via API neste momento. Use o botão "Copiar Prompt da Capa" para gerar no Gemini/ImageFX ou use os Fundos Estúdio / Upload de Foto aqui no app!');
+}
+
+// ============================================================================
+// 6. PREENCHIMENTO RÁPIDO DO DNA DO CRIADOR ATIVO (IA + FALLBACK LOCAL)
+// ============================================================================
+
+export async function generateCreatorDnaQuickFill({ creator, apiKey, modelName }) {
+  const niche = (creator?.niche || '').trim() || 'Criação de Conteúdo e Posicionamento Digital';
+  const name = (creator?.name || '').trim() || 'Criador(a)';
+  const hintPositioning = (creator?.positioning || '').trim();
+  const hintAudience = (creator?.audience || '').trim();
+  const hintProduct = (creator?.product || '').trim();
+
+  if (!apiKey) {
+    return buildOfflineCreatorDna({ name, niche, hintPositioning, hintAudience, hintProduct });
+  }
+
+  const prompt = `Complete e estruture o DNA estratégico completo para um criador de conteúdo no Instagram Reels/TikTok seguindo os métodos "O Meu Modelo de Reels" (Leislin) e "Código Viral".
+
+INFORMAÇÕES JÁ FORNECIDAS PELO CRIADOR ATIVO:
+- Nome/Marca: ${name}
+- @Arroba: ${creator?.handle || '@perfil'}
+- Nicho / Profissão / Área de atuação: ${niche}
+- Posicionamento inicial (se houver): ${hintPositioning || '(gerar a partir do nicho)'}
+- Público inicial (se houver): ${hintAudience || '(gerar a partir do nicho)'}
+- Produto/Serviço inicial (se houver): ${hintProduct || '(sugerir o produto/serviço mais natural do nicho)'}
+
+Retorne EXATAMENTE este JSON válido (em português natural do Brasil, sem jargões acadêmicos):
+{
+  "niche": "Nome claro e específico do nicho/profissão",
+  "positioning": "Frase direta de posicionamento: Quem você ajuda + qual transformação prática entrega sem complicação",
+  "targetGroupPrefix": "Escolha exatamente UMA opção entre: 'A mulher que', 'A pessoa que', 'O homem que', 'A mãe que', 'A empreendedora que', 'O profissional que'",
+  "audience": "Descrição clara da persona (rotina, faixa de momento de vida, o que trava)",
+  "pains": "1. Dor cotidiana hiperespecífica 1\\n2. Dor cotidiana hiperespecífica 2\\n3. Dor cotidiana hiperespecífica 3",
+  "desires": "1. Desejo concreto 1\\n2. Desejo concreto 2\\n3. Desejo concreto 3",
+  "objections": "Objeções reais entre aspas separadas por vírgula",
+  "pronoun": "você",
+  "tone": "Estilo natural de conversa (como conversa com amiga no café, sem parecer seminário)",
+  "forbiddenWords": "oi gente tudo bem, outrossim, hodiernamente, e mais 4 termos técnicos chatos desse nicho que travam retenção",
+  "product": "Oferta principal / próximo passo natural do funil",
+  "manychatKeyword": "PALAVRACHAVE",
+  "visualStyle": "Minimalista editorial estilo Apple, luz natural limpa, alto contraste para tipografia",
+  "seriesSuggestions": [
+    { "modelId": "serie_01", "title": "O que toda pessoa que [tema do nicho] deveria fazer, mas não faz", "parts": ["Parte 1 específica", "Parte 2 específica", "Parte 3 específica"] },
+    { "modelId": "serie_02", "title": "Comece a...", "parts": ["Comece a [ação prática 1]", "Comece a [ação prática 2]", "Comece a [ação prática 3]"] },
+    { "modelId": "serie_03", "title": "A pessoa que...", "parts": ["A pessoa que [situação específica 1] não deveria [erro]", "A pessoa que [situação específica 2] não deveria [erro]", "A pessoa que [situação específica 3] precisa entender isso"] },
+    { "modelId": "serie_04", "title": "Como [desejo do nicho] sem [dificuldade comum] (parte 1)", "parts": ["Alternativa prática 1", "Alternativa prática 2", "Alternativa prática 3"] },
+    { "modelId": "serie_05", "title": "Quem quer... deveria fazer isso aqui", "parts": ["Quem quer [desejo 1] deveria fazer isso aqui.", "Quem quer [desejo 2] deveria fazer isso aqui.", "Quem quer [desejo 3] deveria fazer isso aqui."] }
+  ]
+}`;
+
+  const { text, modelUsed } = await callGemini({ apiKey, modelName, prompt, expectJson: true });
+  const parsed = cleanJsonResponse(text);
+  return { ...parsed, generatedBy: `IA (${modelUsed})` };
+}
+
+function buildOfflineCreatorDna({ name, niche, hintPositioning, hintAudience, hintProduct }) {
+  const shortNiche = niche.split(/[(-]/)[0].trim() || 'seu mercado';
+  const keyword = shortNiche
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z]/g, '')
+    .toUpperCase()
+    .slice(0, 8) || 'GUIA';
+
+  return {
+    niche,
+    positioning: hintPositioning || `Ajudo pessoas com rotina corrida a terem resultados reais em ${shortNiche} de forma simples e sem complicação.`,
+    targetGroupPrefix: 'A pessoa que',
+    audience: hintAudience || `Pessoas interessadas em ${shortNiche} que já tentaram métodos complexos, têm pouco tempo no dia a dia e buscam orientação prática e direta.`,
+    pains: [
+      `1. Tenta aplicar dicas soltas sobre ${shortNiche} e se frustra por não ver consistência.`,
+      `2. Sente que falta tempo ou clareza para saber o que realmente priorizar primeiro.`,
+      `3. Fica insegura na hora de escolher ou agir e acaba adiando a decisão.`
+    ].join('\n'),
+    desires: [
+      `1. Resolver os principais desafios de ${shortNiche} com um passo a passo simples.`,
+      `2. Economizar tempo e evitar erros caros ou retrabalho.`,
+      `3. Sentir confiança e autonomia para manter resultados na prática.`
+    ].join('\n'),
+    objections: `"Não tenho tempo para aplicar isso agora", "Acho que meu caso é difícil demais", "Já tentei outras coisas antes e não funcionou".`,
+    pronoun: 'você',
+    tone: `Direto, acolhedor e prático — conversa leve como com uma amiga no café, com a autoridade acessível de ${name}.`,
+    forbiddenWords: 'oi gente tudo bem, olá pessoal, outrossim, hodiernamente, ademais, vale salientar',
+    product: hintProduct || `Consultoria / Atendimento Personalizado em ${shortNiche}`,
+    manychatKeyword: keyword,
+    visualStyle: 'Minimalista editorial estilo Apple, luz natural limpa e espaço claro/escuro para leitura imediata.',
+    seriesSuggestions: [
+      {
+        modelId: 'serie_01',
+        title: `O que toda pessoa em ${shortNiche} deveria fazer, mas não faz`,
+        parts: [
+          `O que toda pessoa que busca resultado em ${shortNiche} deveria fazer antes de começar, mas não faz.`,
+          `O que todo mundo que trava em ${shortNiche} deveria conferir toda semana, mas não confere.`,
+          `O que toda pessoa que quer economizar tempo com ${shortNiche} deveria fazer, mas ignora.`
+        ]
+      },
+      {
+        modelId: 'serie_02',
+        title: 'Comece a...',
+        parts: [
+          `Comece a ajustar esse primeiro ponto na sua rotina de ${shortNiche}.`,
+          `Comece a observar esse detalhe antes de tomar qualquer decisão em ${shortNiche}.`,
+          `Comece a aplicar a regra dos 10 minutos para destravar ${shortNiche}.`
+        ]
+      },
+      {
+        modelId: 'serie_03',
+        title: 'A pessoa que...',
+        parts: [
+          `A pessoa que tenta resolver ${shortNiche} só na pressa não deveria estranhar quando trava.`,
+          `A pessoa que copia tudo da internet sem adaptar para a própria rotina precisa ouvir isso.`,
+          `A pessoa que acha que precisa de perfeição para começar em ${shortNiche} está perdendo resultado.`
+        ]
+      },
+      {
+        modelId: 'serie_04',
+        title: `Como dominar ${shortNiche} sem complicar sua rotina (parte 1)`,
+        parts: [
+          `Simplificar a primeira etapa com o que você já tem hoje.`,
+          `Trocar excesso de informação por uma única meta semanal.`,
+          `Evitar os 2 erros invisíveis que mais consomem seu tempo.`
+        ]
+      },
+      {
+        modelId: 'serie_05',
+        title: 'Quem quer... deveria fazer isso aqui',
+        parts: [
+          `Quem quer resultado consistente em ${shortNiche} deveria fazer isso aqui.`,
+          `Quem quer parar de cometer o mesmo erro básico em ${shortNiche} deveria fazer isso aqui.`,
+          `Quem quer dar o próximo passo com ${hintProduct || shortNiche} deveria fazer isso aqui.`
+        ]
+      }
+    ],
+    generatedBy: 'Preenchimento Inteligente Local (Conecte sua chave Gemini para personalização avançada por IA)'
+  };
 }

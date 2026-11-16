@@ -12,7 +12,8 @@ import {
   generateSeriesIdeas,
   searchHotTopics,
   analyzeScript,
-  generateCoverBackground
+  generateCoverBackground,
+  generateCreatorDnaQuickFill
 } from './gemini.js';
 import { COVER_TEMPLATES, renderCoverCanvas, downloadDataUrl } from './cover-studio.js';
 
@@ -32,8 +33,10 @@ let tpFsInterval = null;
 document.addEventListener('DOMContentLoaded', async () => {
   registerServiceWorker();
   state = await loadState();
+  applyTheme(state.settings.theme || 'light');
 
   populateStaticSelects();
+  wireThemeToggle();
   wireNavigation();
   wireModals();
   wireCreatorTab();
@@ -50,9 +53,44 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (activeEp) {
     loadEpisodeIntoFactory(activeEp);
   } else {
+    renderSeriesPartsStrip();
     await updateCoverPreview();
   }
 });
+
+function applyTheme(theme) {
+  const mode = theme === 'dark' ? 'dark' : 'light';
+  document.documentElement.setAttribute('data-theme', mode);
+  const metaTheme = document.querySelector('meta[name="theme-color"]');
+  if (metaTheme) {
+    metaTheme.setAttribute('content', mode === 'dark' ? '#000000' : '#F5F5F7');
+  }
+  const icon = document.getElementById('themeToggleIcon');
+  const label = document.getElementById('themeToggleLabel');
+  if (icon && label) {
+    if (mode === 'dark') {
+      icon.textContent = '☀';
+      label.textContent = 'Claro';
+    } else {
+      icon.textContent = '☾';
+      label.textContent = 'Escuro';
+    }
+  }
+  const tplSel = document.getElementById('cov_template');
+  if (tplSel && (tplSel.value === 'apple_light' || tplSel.value === 'apple_dark')) {
+    tplSel.value = mode === 'dark' ? 'apple_dark' : 'apple_light';
+    updateCoverPreview();
+  }
+}
+
+function wireThemeToggle() {
+  document.getElementById('themeToggleBtn').addEventListener('click', async () => {
+    const next = (state.settings.theme || 'light') === 'light' ? 'dark' : 'light';
+    state.settings.theme = next;
+    applyTheme(next);
+    await persist();
+  });
+}
 
 function registerServiceWorker() {
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
@@ -105,9 +143,10 @@ function escapeHtml(str) {
 // ============================================================================
 
 function populateStaticSelects() {
-  // Professions selector in Tab 1
-  const profSel = document.getElementById('importProfessionSelect');
-  profSel.innerHTML = PROFESSIONS.map((p) => `<option value="${p.id}">${p.category} — ${p.name}</option>`).join('');
+  // Professions selector in Tab 1 and Quick Fill in Factory
+  const profOptions = PROFESSIONS.map((p) => `<option value="${p.id}">${p.category} — ${p.name}</option>`).join('');
+  document.getElementById('importProfessionSelect').innerHTML = profOptions;
+  document.getElementById('qfProfSelect').innerHTML = profOptions;
 
   // Series Models in Factory
   const modelOptions = SERIES_MODELS.map((m) => `<option value="${m.id}">${m.code}: ${m.shortName}</option>`).join('');
@@ -122,10 +161,11 @@ function populateStaticSelects() {
     .map((h) => `<option value="${h.id}">${h.label}</option>`)
     .join('');
 
-  // Cover Templates
-  document.getElementById('cov_template').innerHTML = COVER_TEMPLATES
+  const tplSel = document.getElementById('cov_template');
+  tplSel.innerHTML = COVER_TEMPLATES
     .map((t) => `<option value="${t.id}">${t.name}</option>`)
     .join('');
+  tplSel.value = (state?.settings?.theme || 'light') === 'dark' ? 'apple_dark' : 'apple_light';
 
   // Pre-record Checklist in Tab 4
   document.getElementById('preRecordChecklist').innerHTML = VIRAL_CODE.preRecordChecklist
@@ -199,7 +239,10 @@ function switchTab(tabId) {
 function refreshAllUI() {
   renderCreatorSelect();
   loadCreatorIntoForm();
+  renderFactoryContextBar();
   renderFactorySeriesSelect();
+  renderSeriesPartsStrip();
+  renderQuickFillFactory();
   updateModelRuleHint();
   renderSeriesFolders();
   renderCatalog();
@@ -215,20 +258,20 @@ function updateStatusIndicators() {
   const aiText = document.getElementById('aiStatusText');
   if (state.settings.geminiKey) {
     aiDot.className = 'dot dot-ok';
-    aiText.textContent = 'IA: Gemini Conectado';
+    aiText.textContent = 'IA Conectada';
   } else {
     aiDot.className = 'dot dot-warn';
-    aiText.textContent = 'IA: Modo Local (Clique p/ Chave)';
+    aiText.textContent = 'IA: Local';
   }
 
   const driveDot = document.getElementById('driveStatusDot');
   const driveText = document.getElementById('driveStatusText');
   if (state.settings.driveWebhookUrl) {
     driveDot.className = 'dot dot-ok';
-    driveText.textContent = 'Drive Conectado';
+    driveText.textContent = 'Drive Ativo';
   } else {
     driveDot.className = 'dot dot-local';
-    driveText.textContent = 'Memória & Drive';
+    driveText.textContent = 'Drive';
   }
 
   const syncInfo = document.getElementById('driveLastSyncInfo');
@@ -257,7 +300,7 @@ function wireModals() {
 
   document.getElementById('openAiModalBtn').addEventListener('click', () => {
     document.getElementById('m_geminiKey').value = state.settings.geminiKey || '';
-    document.getElementById('m_geminiModel').value = state.settings.geminiModel || 'gemini-2.5-flash';
+    document.getElementById('m_geminiModel').value = state.settings.geminiModel || 'gemini-3.8-flash';
     document.getElementById('aiModal').classList.remove('hidden');
   });
 
@@ -297,6 +340,10 @@ function wireModals() {
         throw new Error('Arquivo de backup inválido.');
       }
       state = imported;
+      if (!state.settings?.geminiModel || /gemini-2\.(0|5)-flash/i.test(state.settings.geminiModel)) {
+        state.settings.geminiModel = 'gemini-3.8-flash';
+      }
+      applyTheme(state.settings?.theme || 'light');
       await persist();
       refreshAllUI();
       showToast('Backup restaurado com sucesso!', 'ok');
@@ -343,6 +390,10 @@ function wireModals() {
       } else {
         state = res.data;
         state.settings.driveWebhookUrl = url;
+        if (!state.settings?.geminiModel || /gemini-2\.(0|5)-flash/i.test(state.settings.geminiModel)) {
+          state.settings.geminiModel = 'gemini-3.8-flash';
+        }
+        applyTheme(state.settings?.theme || 'light');
         await persist();
         refreshAllUI();
         showToast('Dados carregados do Google Drive!', 'ok');
@@ -411,28 +462,17 @@ function wireCreatorTab() {
   });
 
   document.getElementById('saveCreatorBtn').addEventListener('click', async () => {
-    const c = getActiveCreator();
-    c.name = document.getElementById('c_name').value.trim() || 'Criador Sem Nome';
-    c.handle = document.getElementById('c_handle').value.trim();
-    c.niche = document.getElementById('c_niche').value.trim();
-    c.positioning = document.getElementById('c_positioning').value.trim();
-    c.brandColor = document.getElementById('c_brandColor').value;
-    c.visualStyle = document.getElementById('c_visualStyle').value.trim();
-    c.targetGroupPrefix = document.getElementById('c_targetGroupPrefix').value;
-    c.audience = document.getElementById('c_audience').value.trim();
-    c.pains = document.getElementById('c_pains').value.trim();
-    c.desires = document.getElementById('c_desires').value.trim();
-    c.pronoun = document.getElementById('c_pronoun').value;
-    c.tone = document.getElementById('c_tone').value.trim();
-    c.forbiddenWords = document.getElementById('c_forbiddenWords').value.trim();
-    c.product = document.getElementById('c_product').value.trim();
-    c.objections = document.getElementById('c_objections').value.trim();
-    c.manychatKeyword = document.getElementById('c_manychatKeyword').value.trim().toUpperCase();
-
+    syncFormToActiveCreator();
     await persist();
     renderCreatorSelect();
+    renderFactoryContextBar();
+    renderQuickFillFactory();
     await updateCoverPreview();
     showToast('DNA do Criador salvo na memória!', 'ok');
+  });
+
+  document.getElementById('quickFillActiveCreatorBtn').addEventListener('click', async () => {
+    await handleQuickFillActiveCreator();
   });
 
   document.getElementById('newCreatorBtn').addEventListener('click', async () => {
@@ -454,13 +494,13 @@ function wireCreatorTab() {
       product: '',
       manychatKeyword: 'QUERO',
       brandColor: '#8B5CF6',
-      visualStyle: 'Fundo editorial limpo, luz natural'
+      visualStyle: 'Minimalista editorial estilo Apple, luz natural limpa'
     });
     state.activeCreatorId = newId;
     await persist();
     refreshAllUI();
     clearFactoryFields();
-    showToast('Novo perfil criado! Preencha os dados ou importe uma profissão.', 'ok');
+    showToast('Novo perfil criado! Use o Preenchimento Rápido ou preencha abaixo.', 'ok');
   });
 
   document.getElementById('deleteCreatorBtn').addEventListener('click', async () => {
@@ -485,15 +525,160 @@ function wireCreatorTab() {
   });
 }
 
+function syncFormToActiveCreator() {
+  const c = getActiveCreator();
+  if (!c) return c;
+  c.name = document.getElementById('c_name').value.trim() || 'Criador Sem Nome';
+  c.handle = document.getElementById('c_handle').value.trim();
+  c.niche = document.getElementById('c_niche').value.trim();
+  c.positioning = document.getElementById('c_positioning').value.trim();
+  c.brandColor = document.getElementById('c_brandColor').value;
+  c.visualStyle = document.getElementById('c_visualStyle').value.trim();
+  c.targetGroupPrefix = document.getElementById('c_targetGroupPrefix').value;
+  c.audience = document.getElementById('c_audience').value.trim();
+  c.pains = document.getElementById('c_pains').value.trim();
+  c.desires = document.getElementById('c_desires').value.trim();
+  c.pronoun = document.getElementById('c_pronoun').value;
+  c.tone = document.getElementById('c_tone').value.trim();
+  c.forbiddenWords = document.getElementById('c_forbiddenWords').value.trim();
+  c.product = document.getElementById('c_product').value.trim();
+  c.objections = document.getElementById('c_objections').value.trim();
+  c.manychatKeyword = document.getElementById('c_manychatKeyword').value.trim().toUpperCase();
+  return c;
+}
+
+async function handleQuickFillActiveCreator() {
+  const creator = syncFormToActiveCreator();
+  if (!creator) return;
+
+  if (!creator.niche && !creator.positioning) {
+    showToast('Digite pelo menos o Nicho ou Posicionamento do Criador Ativo no formulário (ou escolha uma das 33 Profissões).', 'err');
+    switchTab('tab-creator');
+    document.getElementById('c_niche').focus();
+    return;
+  }
+
+  const btns = [
+    document.getElementById('quickFillActiveCreatorBtn'),
+    document.getElementById('factoryQuickFillDnaBtn')
+  ].filter(Boolean);
+  btns.forEach((b) => {
+    b.disabled = true;
+    b.dataset.orig = b.textContent;
+    b.textContent = '⏳ Gerando DNA do Criador...';
+  });
+
+  try {
+    const filled = await generateCreatorDnaQuickFill({
+      creator,
+      apiKey: state.settings.geminiKey,
+      modelName: state.settings.geminiModel
+    });
+
+    creator.niche = filled.niche || creator.niche;
+    creator.positioning = filled.positioning || creator.positioning;
+    creator.targetGroupPrefix = filled.targetGroupPrefix || creator.targetGroupPrefix || 'A pessoa que';
+    creator.audience = filled.audience || creator.audience;
+    creator.pains = filled.pains || creator.pains;
+    creator.desires = filled.desires || creator.desires;
+    creator.objections = filled.objections || creator.objections;
+    creator.pronoun = filled.pronoun || creator.pronoun || 'você';
+    creator.tone = filled.tone || creator.tone;
+    creator.forbiddenWords = filled.forbiddenWords || creator.forbiddenWords;
+    creator.product = filled.product || creator.product;
+    creator.manychatKeyword = (filled.manychatKeyword || creator.manychatKeyword || 'EUQUERO').toUpperCase();
+    creator.visualStyle = filled.visualStyle || creator.visualStyle;
+
+    let addedSeries = 0;
+    (filled.seriesSuggestions || []).forEach((s) => {
+      const exists = state.series.some((ex) => ex.creatorId === creator.id && ex.name === s.title);
+      if (!exists && s.title) {
+        const sId = uid('serie');
+        state.series.push({
+          id: sId,
+          creatorId: creator.id,
+          name: s.title,
+          modelId: s.modelId || 'serie_01',
+          description: `Série personalizada para ${creator.name}`,
+          color: creator.brandColor || '#8B5CF6',
+          createdAt: new Date().toISOString()
+        });
+        (s.parts || []).forEach((partTitle, idx) => {
+          state.episodes.push({
+            id: uid('ep'),
+            creatorId: creator.id,
+            seriesId: sId,
+            partNumber: idx + 1,
+            title: partTitle,
+            onScreenText: `${s.title} • Parte ${idx + 1}`,
+            headlines: [String(partTitle).slice(0, 48)],
+            funnelStage: idx === 2 ? 'meio' : 'topo',
+            viralGoal: 'share',
+            status: 'ideia',
+            script: '',
+            caption: '',
+            editingPrompt: '',
+            coverImagePrompt: '',
+            coverDataUrl: '',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          });
+        });
+        addedSeries++;
+      }
+    });
+
+    await persist();
+    refreshAllUI();
+    showToast(`DNA de "${creator.name}" completado (${filled.generatedBy}) + ${addedSeries} séries criadas!`, 'ok');
+  } catch (err) {
+    showToast(`Erro no preenchimento rápido: ${err.message}`, 'err');
+  } finally {
+    btns.forEach((b) => {
+      b.disabled = false;
+      if (b.dataset.orig) b.textContent = b.dataset.orig;
+    });
+  }
+}
+
 async function importProfessionForActiveCreator(profId) {
   const prof = PROFESSIONS.find((p) => p.id === profId);
   if (!prof) return;
-  const creator = getActiveCreator();
+  const creator = syncFormToActiveCreator();
 
   creator.professionId = prof.id;
-  if (!creator.niche) creator.niche = prof.name;
   creator.niche = `${prof.name} (${prof.category})`;
   creator.positioning = prof.subtitle;
+
+  // Populate full DNA fields from the selected profession's scenarios & desires
+  const s3Parts = prof.series.find((s) => s.modelId === 'serie_03')?.parts || [];
+  const s5Parts = prof.series.find((s) => s.modelId === 'serie_05')?.parts || [];
+  const firstS3 = s3Parts[0] || '';
+  const detectedPrefix = ['A mulher que', 'A mãe que', 'O homem que', 'A empreendedora que', 'O profissional que']
+    .find((pref) => firstS3.startsWith(pref)) || 'A pessoa que';
+
+  creator.targetGroupPrefix = detectedPrefix;
+  creator.audience = `Público interessado em ${prof.name} que se identifica com: "${prof.subtitle}"`;
+  creator.pains = (s3Parts.length ? s3Parts : prof.series.slice(0, 3).map((s) => s.parts[0]))
+    .slice(0, 3)
+    .map((txt, i) => `${i + 1}. ${txt}`)
+    .join('\n');
+  creator.desires = (s5Parts.length ? s5Parts : prof.series.slice(2, 5).map((s) => s.parts[0]))
+    .slice(0, 3)
+    .map((txt, i) => `${i + 1}. ${txt}`)
+    .join('\n');
+  creator.objections = `"Não tenho tempo para aplicar isso agora", "Acho difícil manter consistência", "Já tentei outras dicas de ${prof.name} antes".`;
+  creator.pronoun = 'você';
+  creator.tone = `Direto, acolhedor e prático — conversa leve como com uma amiga sobre ${prof.name}.`;
+  creator.forbiddenWords = 'oi gente tudo bem, olá pessoal, outrossim, hodiernamente, jargões técnicos complicados';
+  creator.product = `Consultoria / Atendimento Especializado em ${prof.name}`;
+  creator.manychatKeyword = prof.name
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z]/g, '')
+    .toUpperCase()
+    .slice(0, 8) || 'GUIA';
+  creator.visualStyle = 'Minimalista editorial estilo Apple, luz natural limpa e contraste nítido';
 
   let importedSeriesCount = 0;
   prof.series.forEach((s) => {
@@ -506,7 +691,7 @@ async function importProfessionForActiveCreator(profId) {
         name: s.title,
         modelId: s.modelId,
         description: `Série oficial de ${prof.name} (Guia 33 Profissões)`,
-        color: creator.brandColor || '#EC4899',
+        color: creator.brandColor || '#8B5CF6',
         createdAt: new Date().toISOString()
       });
       // Import Parts 1, 2, 3 as ready-to-generate Idea cards
@@ -537,7 +722,7 @@ async function importProfessionForActiveCreator(profId) {
 
   await persist();
   refreshAllUI();
-  showToast(`Profissão "${prof.name}" aplicada e ${importedSeriesCount} séries importadas para suas Pastas!`, 'ok');
+  showToast(`DNA preenchido com "${prof.name}" + ${importedSeriesCount} séries oficiais importadas!`, 'ok');
 }
 
 // ============================================================================
@@ -609,7 +794,7 @@ function renderCachedHotTopics() {
           return `
             <div class="angle-item">
               <span class="angle-tag ${funnelTag}">${funnelLabel}</span>
-              <div class="muted-sm" style="color:#fff;font-weight:600;">${escapeHtml(ang.title)}</div>
+              <div class="angle-title">${escapeHtml(ang.title)}</div>
               <button class="btn btn-secondary btn-sm mt-6 use-trend-btn"
                 data-title="${escapeHtml(ang.title)}"
                 data-model="${escapeHtml(ang.modelId || 'codigo_viral')}"
@@ -650,6 +835,156 @@ function renderCachedHotTopics() {
 // TAB 3: FÁBRICA DE SÉRIES & ROTEIROS + ESTÚDIO DE CAPA 9:16
 // ============================================================================
 
+function renderFactoryContextBar() {
+  const c = getActiveCreator();
+  if (!c) return;
+  const nameEl = document.getElementById('factoryCreatorContextName');
+  const nicheEl = document.getElementById('factoryCreatorContextNiche');
+  if (nameEl) nameEl.textContent = `${c.name} (${c.handle || '@perfil'})`;
+  if (nicheEl) nicheEl.textContent = c.niche ? `• ${c.niche}` : '• Clique em Preencher Rápido para configurar o nicho';
+}
+
+function renderSeriesPartsStrip() {
+  const strip = document.getElementById('seriesPartsStrip');
+  const seriesId = document.getElementById('f_seriesSelect').value;
+  if (!strip) return;
+  if (!seriesId) {
+    strip.innerHTML = '';
+    return;
+  }
+
+  const eps = state.episodes
+    .filter((ep) => ep.seriesId === seriesId)
+    .sort((a, b) => (Number(a.partNumber) || 0) - (Number(b.partNumber) || 0));
+
+  const nextPart = eps.reduce((m, e) => Math.max(m, Number(e.partNumber) || 0), 0) + 1;
+
+  strip.innerHTML = eps.map((ep) => {
+    const isActive = ep.id === currentEditingEpisodeId;
+    const hasScript = Boolean((ep.script || '').trim());
+    return `
+      <button type="button" class="part-pill ${isActive ? 'active' : ''} ${hasScript ? 'has-script' : ''}" data-ep-id="${ep.id}" title="${escapeHtml(ep.title)}">
+        Parte ${ep.partNumber}
+      </button>
+    `;
+  }).join('') + `
+    <button type="button" class="part-pill ${!currentEditingEpisodeId ? 'active' : ''}" id="stripNewPartBtn">
+      + Parte ${nextPart}
+    </button>
+  `;
+
+  strip.querySelectorAll('[data-ep-id]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const ep = state.episodes.find((item) => item.id === btn.dataset.epId);
+      if (ep) loadEpisodeIntoFactory(ep);
+    });
+  });
+
+  const newPartBtn = document.getElementById('stripNewPartBtn');
+  if (newPartBtn) {
+    newPartBtn.addEventListener('click', () => {
+      clearFactoryFields();
+    });
+  }
+}
+
+function renderQuickFillFactory() {
+  const creator = getActiveCreator();
+  const chipsEl = document.getElementById('qfCreatorChips');
+  const profSel = document.getElementById('qfProfSelect');
+
+  if (chipsEl && creator) {
+    const items = [];
+    const parseLines = (txt, typeLabel, modelId, funnel) => {
+      String(txt || '')
+        .split('\n')
+        .map((l) => l.replace(/^\d+[\.\)\-\s]+/, '').trim())
+        .filter(Boolean)
+        .forEach((line) => items.push({ label: typeLabel, text: line, modelId, funnel }));
+    };
+
+    parseLines(creator.pains, 'Dor', 'serie_03', 'topo');
+    parseLines(creator.desires, 'Desejo', 'serie_05', 'fundo');
+
+    if (creator.objections) {
+      String(creator.objections)
+        .split(/[,;\n]/)
+        .map((s) => s.replace(/["']/g, '').trim())
+        .filter((s) => s.length > 5)
+        .slice(0, 2)
+        .forEach((obj) => items.push({ label: 'Objeção', text: obj, modelId: 'codigo_viral', funnel: 'fundo' }));
+    }
+
+    if (!items.length) {
+      chipsEl.innerHTML = `<div class="muted-xs">Preencha as dores/desejos no DNA do Criador ou clique no botão abaixo para completar o perfil ativo.</div>`;
+    } else {
+      chipsEl.innerHTML = items.map((it) => `
+        <button type="button" class="qf-chip" data-text="${escapeHtml(it.text)}" data-model="${it.modelId}" data-funnel="${it.funnel}">
+          <span class="qf-chip-tag">${escapeHtml(it.label)}</span>${escapeHtml(it.text)}
+        </button>
+      `).join('');
+
+      chipsEl.querySelectorAll('.qf-chip').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          document.getElementById('f_topic').value = btn.dataset.text;
+          document.getElementById('f_modelSelect').value = btn.dataset.model;
+          document.getElementById('f_funnelStage').value = btn.dataset.funnel;
+          document.getElementById('f_qProblem').value = btn.dataset.text;
+          updateModelRuleHint();
+          showToast('Tema do Criador Ativo preenchido na Fábrica!', 'ok');
+        });
+      });
+    }
+  }
+
+  if (profSel) {
+    if (creator?.professionId) {
+      profSel.value = creator.professionId;
+    }
+    renderQuickFillProfIdeas(profSel.value);
+  }
+}
+
+function renderQuickFillProfIdeas(profId) {
+  const box = document.getElementById('qfProfIdeas');
+  const prof = PROFESSIONS.find((p) => p.id === profId) || PROFESSIONS[0];
+  if (!box || !prof) return;
+
+  const list = [];
+  prof.series.forEach((s) => {
+    (s.parts || []).forEach((pt, idx) => {
+      list.push({ modelId: s.modelId, seriesTitle: s.title, partNumber: idx + 1, title: pt });
+    });
+  });
+
+  box.innerHTML = list.map((item) => `
+    <button type="button" class="qf-chip"
+      data-topic="${escapeHtml(item.title)}"
+      data-model="${item.modelId}"
+      data-part="${item.partNumber}"
+      data-series="${escapeHtml(item.seriesTitle)}">
+      <span class="qf-chip-tag">P.${item.partNumber}</span>${escapeHtml(item.title)}
+    </button>
+  `).join('');
+
+  box.querySelectorAll('.qf-chip').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      document.getElementById('f_topic').value = btn.dataset.topic;
+      document.getElementById('f_modelSelect').value = btn.dataset.model;
+      document.getElementById('f_partNumber').value = btn.dataset.part;
+      // Match existing series folder if imported
+      const matchingSerie = getCreatorSeries().find((s) => s.name === btn.dataset.series);
+      if (matchingSerie) {
+        document.getElementById('f_seriesSelect').value = matchingSerie.id;
+        document.getElementById('cov_seriesLabel').value = matchingSerie.name;
+      }
+      updateModelRuleHint();
+      renderSeriesPartsStrip();
+      showToast('Ideia da profissão preenchida!', 'ok');
+    });
+  });
+}
+
 function renderFactorySeriesSelect() {
   const sel = document.getElementById('f_seriesSelect');
   const series = getCreatorSeries();
@@ -670,18 +1005,78 @@ function updateModelRuleHint() {
 }
 
 function wireFactoryTab() {
+  document.getElementById('factoryEditDnaBtn').addEventListener('click', () => {
+    switchTab('tab-creator');
+  });
+
+  document.getElementById('factoryQuickFillDnaBtn').addEventListener('click', async () => {
+    await handleQuickFillActiveCreator();
+  });
+
+  // Segmented Quick Fill mode toggle (Active Creator DNA vs 33 Professions)
+  const modeCreatorBtn = document.getElementById('qfModeCreatorBtn');
+  const modeProfBtn = document.getElementById('qfModeProfBtn');
+  const creatorPanel = document.getElementById('qfCreatorPanel');
+  const profPanel = document.getElementById('qfProfPanel');
+
+  modeCreatorBtn.addEventListener('click', () => {
+    modeCreatorBtn.classList.add('active');
+    modeProfBtn.classList.remove('active');
+    creatorPanel.classList.remove('hidden');
+    profPanel.classList.add('hidden');
+  });
+
+  modeProfBtn.addEventListener('click', () => {
+    modeProfBtn.classList.add('active');
+    modeCreatorBtn.classList.remove('active');
+    profPanel.classList.remove('hidden');
+    creatorPanel.classList.add('hidden');
+  });
+
+  document.getElementById('qfProfSelect').addEventListener('change', (e) => {
+    renderQuickFillProfIdeas(e.target.value);
+  });
+
+  document.getElementById('qfFillFromCreatorBtn').addEventListener('click', () => {
+    const creator = getActiveCreator();
+    if (!creator) return;
+    // Prefer a pending idea episode of active creator, else cycle pains/desires
+    const pendingEp = getCreatorEpisodes().find((ep) => !(ep.script || '').trim());
+    if (pendingEp) {
+      loadEpisodeIntoFactory(pendingEp);
+      showToast(`Ideia pendente carregada: "${pendingEp.title.slice(0, 40)}..."`, 'ok');
+      return;
+    }
+
+    const firstPain = String(creator.pains || '')
+      .split('\n')
+      .map((l) => l.replace(/^\d+[\.\)\-\s]+/, '').trim())
+      .filter(Boolean)[0];
+    const firstDesire = String(creator.desires || '')
+      .split('\n')
+      .map((l) => l.replace(/^\d+[\.\)\-\s]+/, '').trim())
+      .filter(Boolean)[0];
+
+    document.getElementById('f_topic').value = firstPain || creator.positioning || `Dica prática de ${creator.niche || 'seu nicho'}`;
+    document.getElementById('f_qProblem').value = firstPain || creator.positioning || '';
+    document.getElementById('f_qLearn').value = creator.product ? `Um ajuste simples antes de buscar ${creator.product}` : 'Uma orientação prática e imediata';
+    document.getElementById('f_qLifeChange').value = firstDesire || 'Mais resultado sem complicação';
+    showToast('Dor, contexto e 3 perguntas preenchidos com o Criador Ativo!', 'ok');
+  });
+
   document.getElementById('f_modelSelect').addEventListener('change', updateModelRuleHint);
 
   document.getElementById('f_seriesSelect').addEventListener('change', (e) => {
     const serie = state.series.find((s) => s.id === e.target.value);
     if (serie) {
+      currentEditingEpisodeId = null;
       document.getElementById('f_modelSelect').value = serie.modelId || 'serie_01';
       updateModelRuleHint();
-      // Auto-suggest next part number
       const eps = state.episodes.filter((ep) => ep.seriesId === serie.id);
       const maxPart = eps.reduce((max, ep) => Math.max(max, Number(ep.partNumber) || 0), 0);
       document.getElementById('f_partNumber').value = maxPart + 1;
       document.getElementById('cov_seriesLabel').value = serie.name;
+      renderSeriesPartsStrip();
       updateCoverPreview();
     }
   });
@@ -707,7 +1102,7 @@ function wireFactoryTab() {
       name,
       modelId,
       description: '',
-      color: getActiveCreator().brandColor || '#EC4899',
+      color: getActiveCreator().brandColor || '#8B5CF6',
       createdAt: new Date().toISOString()
     });
     await persist();
@@ -719,6 +1114,7 @@ function wireFactoryTab() {
     document.getElementById('ns_name').value = '';
     document.getElementById('newSeriesBox').classList.add('hidden');
     updateModelRuleHint();
+    renderSeriesPartsStrip();
     updateCoverPreview();
     showToast(`Pasta "${name}" criada!`, 'ok');
   });
@@ -767,7 +1163,7 @@ function wireFactoryTab() {
       showToast(err.message, 'err');
     } finally {
       btn.disabled = false;
-      btn.textContent = '💡 Sugerir 5 Ideias de Partes';
+      btn.textContent = '💡 5 Ideias IA';
     }
   });
 
@@ -944,7 +1340,7 @@ async function handleGenerateEpisode() {
     showToast(`Erro ao gerar roteiro: ${err.message}`, 'err');
   } finally {
     btn.disabled = false;
-    btn.textContent = '⚡ Gerar Pacote Completo & Viral';
+    btn.textContent = '⚡ Gerar Pacote Completo';
   }
 }
 
@@ -977,21 +1373,22 @@ function updateScriptTimerBadge() {
   const secs = Math.round(words / 2.3);
   const badge = document.getElementById('scriptTimerBadge');
   badge.textContent = `~${words} palavras • ~${secs}s`;
-  badge.style.color = secs > 60 ? '#fca5a5' : '#ddd6fe';
+  badge.style.color = secs > 60 ? 'var(--red)' : 'var(--soft-accent)';
 }
 
 function getCoverOptions() {
   const seriesId = document.getElementById('f_seriesSelect').value;
   const serie = state.series.find((s) => s.id === seriesId);
   const creator = getActiveCreator();
+  const defaultTpl = (state?.settings?.theme || 'light') === 'dark' ? 'apple_dark' : 'apple_light';
 
   return {
     headline: document.getElementById('cov_headline').value || document.getElementById('o_selectedHeadline').value || document.getElementById('o_title').value || 'HEADLINE VIRAL DO SEU REELS',
     seriesName: document.getElementById('cov_seriesLabel').value || serie?.name || 'SÉRIE',
     partNumber: Number(document.getElementById('f_partNumber').value) || 1,
     handle: creator?.handle || '@seuperfil',
-    accentColor: creator?.brandColor || '#EC4899',
-    templateId: document.getElementById('cov_template').value || 'gradient_glow',
+    accentColor: creator?.brandColor || '#8B5CF6',
+    templateId: document.getElementById('cov_template').value || defaultTpl,
     bgDataUrl: currentCoverBgDataUrl,
     showSafeZone: document.getElementById('cov_safeZoneToggle').checked
   };
@@ -1054,6 +1451,7 @@ async function saveCurrentEpisode() {
   }
 
   await persist();
+  renderSeriesPartsStrip();
   renderSeriesFolders();
   showToast('Episódio + Capa 9:16 salvos na Pasta da Série!', 'ok');
 }
@@ -1090,6 +1488,7 @@ function loadEpisodeIntoFactory(ep) {
   document.getElementById('cov_headline').value = hl;
   document.getElementById('cov_seriesLabel').value = serie?.name || 'SÉRIE';
 
+  renderSeriesPartsStrip();
   updateScriptTimerBadge();
   updateCoverPreview();
 }
@@ -1118,6 +1517,7 @@ function clearFactoryFields() {
   document.getElementById('o_selectedHeadline').value = '';
   document.getElementById('cov_headline').value = '';
   document.getElementById('cov_seriesLabel').value = serie?.name || '';
+  renderSeriesPartsStrip();
   updateScriptTimerBadge();
   updateCoverPreview();
 }
