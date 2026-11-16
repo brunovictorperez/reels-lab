@@ -392,6 +392,15 @@
 
                   <div id="qfCreatorPanel">
                     <div id="qfCreatorChips" class="chip-wrap"></div>
+                    <div class="qf-custom-bar mt-8">
+                      <select id="qfCustomType" class="input qf-custom-select" title="Tipo de item personalizado">
+                        <option value="pain">Dor</option>
+                        <option value="desire">Desejo</option>
+                        <option value="objection">Objeção</option>
+                      </select>
+                      <input type="text" id="qfCustomInput" class="input flex-1" placeholder="Escreva dor, desejo ou objeção personalizada..." />
+                      <button type="button" id="qfAddCustomBtn" class="btn btn-primary btn-sm">+ Usar &amp; Salvar</button>
+                    </div>
                     <button type="button" id="qfFillFromCreatorBtn" class="btn btn-secondary btn-sm btn-block mt-8">
                       ✨ Puxar Dor + Perguntas do Criador Ativo
                     </button>
@@ -425,19 +434,19 @@
                   </div>
                 </div>
 
-                <details class="pre-questions">
-                  <summary>📋 As 3 Perguntas da Leislin (Opcional — refina o roteiro)</summary>
+                <details class="pre-questions" open>
+                  <summary>📋 Dor, Orientação &amp; Desejo deste Episódio (Editável)</summary>
                   <div class="form-group mt-8">
-                    <label>1. Qual problema real aborda?</label>
-                    <input type="text" id="f_qProblem" class="input" placeholder="Situação cotidiana vivida pelo público" />
+                    <label>1. Dor / Problema específico deste vídeo</label>
+                    <input type="text" id="f_qProblem" class="input" placeholder="Ex: Sente dor nas costas ao acordar..." />
                   </div>
                   <div class="form-group">
-                    <label>2. Qual ÚNICA coisa a pessoa aprende?</label>
-                    <input type="text" id="f_qLearn" class="input" placeholder="1 orientação prática" />
+                    <label>2. Única orientação prática que a pessoa aprende</label>
+                    <input type="text" id="f_qLearn" class="input" placeholder="1 passo simples aplicável hoje" />
                   </div>
-                  <div class="form-group">
-                    <label>3. O que isso muda na vida dela?</label>
-                    <input type="text" id="f_qLifeChange" class="input" placeholder="Benefício concreto" />
+                  <div class="form-group" style="margin-bottom:4px;">
+                    <label>3. Desejo / Transformação na vida da pessoa</label>
+                    <input type="text" id="f_qLifeChange" class="input" placeholder="Benefício concreto que ela conquista" />
                   </div>
                 </details>
               </div>
@@ -636,8 +645,40 @@
                   <strong>✗ O que está impedindo de crescer</strong>
                   <ul id="clubBlockerList"></ul>
                 </div>
-                <div class="mt-12">
-                  <button id="applyClubFixBtn" class="btn btn-primary btn-block">✨ Aplicar Roteiro Otimizado</button>
+
+                <!-- BEFORE vs AFTER DIFF & APPROVAL -->
+                <div id="clubDiffBox" class="club-diff-box mt-12">
+                  <div class="label-between mb-12">
+                    <div>
+                      <strong style="font-size:0.9rem;">⚖️ Comparativo Antes × Depois</strong>
+                      <div class="muted-xs">Revise o que foi removido (<span class="diff-legend-del">riscado</span>) e adicionado (<span class="diff-legend-add">destacado</span>) antes de aprovar.</div>
+                    </div>
+                    <button type="button" id="toggleEditAfterBtn" class="btn btn-secondary btn-sm">✏️ Editar texto final</button>
+                  </div>
+
+                  <div class="club-diff-grid">
+                    <div class="diff-card">
+                      <div class="label-between">
+                        <span class="diff-label diff-label-before">Antes (Original)</span>
+                        <span id="clubBeforeStats" class="muted-xs"></span>
+                      </div>
+                      <div id="clubBeforeView" class="diff-pane diff-before"></div>
+                    </div>
+
+                    <div class="diff-card">
+                      <div class="label-between">
+                        <span class="diff-label diff-label-after">Depois (Otimizado)</span>
+                        <span id="clubAfterStats" class="muted-xs"></span>
+                      </div>
+                      <div id="clubAfterView" class="diff-pane diff-after"></div>
+                      <textarea id="clubAfterTextarea" class="input hidden mt-8" rows="9"></textarea>
+                    </div>
+                  </div>
+
+                  <div class="inline-controls mt-12">
+                    <button type="button" id="applyClubFixBtn" class="btn btn-primary flex-1">✅ Aprovar e Aplicar Versão Otimizada</button>
+                    <button type="button" id="discardClubFixBtn" class="btn btn-secondary">↩️ Manter Original</button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -813,12 +854,16 @@
           </div>
 
           <div class="sub-card">
-            <h4>☁️ 2. Sincronização Google Drive</h4>
-            <p class="muted-sm">Cria automaticamente uma pasta <code>Reels Lab - Studio</code> no seu Drive com subpastas por Criador e Série.</p>
+            <h4>☁️ 2. Sincronização Google Drive por Perfil</h4>
+            <p class="muted-sm">Conecte o Drive específico de <strong id="driveProfileLabel">Criador Ativo</strong>. Cada perfil pode salvar em sua própria conta Google.</p>
             <div class="form-group mt-8">
-              <label>URL do App da Web (Google Apps Script)</label>
+              <label>URL do App da Web (Google Apps Script deste perfil)</label>
               <input type="url" id="m_driveUrl" class="input" placeholder="https://script.google.com/macros/s/.../exec" />
             </div>
+            <label class="checkbox-row mb-12">
+              <input type="checkbox" id="m_driveOnlyActiveCreator" checked />
+              <span>Enviar apenas a pasta deste perfil ativo para este Drive (recomendado para contas separadas)</span>
+            </label>
             <div class="inline-controls">
               <button id="syncDriveNowBtn" class="btn btn-gradient btn-sm">☁️ Salvar no Drive Agora</button>
               <button id="loadDriveNowBtn" class="btn btn-secondary btn-sm">📥 Puxar do Drive</button>
@@ -827,13 +872,19 @@
           </div>
         </div>
 
+        <div class="info-banner mt-12">
+          <strong>⚠️ Usando uma 2ª conta Google (<code>/u/1/</code>) e apareceu "Não foi possível abrir o arquivo"?</strong><br/>
+          Quando há mais de uma conta Google logada no mesmo navegador, a tela de autorização de "App não verificado" falha tentando abrir pela conta principal.
+          <strong>Solução rápida:</strong> abra o <a href="https://script.google.com" target="_blank" rel="noopener">script.google.com</a> em uma <strong>Janela Anônima</strong> (<code>Ctrl+Shift+N</code> ou <code>Cmd+Shift+N</code>), entre <strong>apenas</strong> com o e-mail dessa segunda conta, implante e cole a URL <code>/exec</code> aqui.
+        </div>
+
         <details class="mt-12">
           <summary>📖 Passo a passo (2 minutos) para gerar sua URL gratuita no Google Drive</summary>
           <ol class="steps-list">
-            <li>Acesse <a href="https://script.google.com" target="_blank" rel="noopener">script.google.com</a> logado na sua conta Google e clique em <strong>Novo projeto</strong>.</li>
+            <li>Acesse <a href="https://script.google.com" target="_blank" rel="noopener">script.google.com</a> (em <strong>Janela Anônima</strong> se for 2ª conta) e clique em <strong>Novo projeto</strong>.</li>
             <li>Apague o código padrão, clique no botão abaixo para copiar o script conector do Reels Lab e cole lá dentro.</li>
             <li>Clique em <strong>Implantar → Nova implantação</strong>, escolha tipo <strong>App da Web</strong>, "Executar como: <strong>Eu</strong>" e "Quem pode acessar: <strong>Qualquer pessoa</strong>".</li>
-            <li>Autorize o acesso ao seu Drive, copie a URL gerada e cole no campo acima!</li>
+            <li>Autorize o acesso (clique em <em>Avançado → Acessar projeto (não seguro)</em>), copie a URL <code>/exec</code> e cole no perfil correspondente acima!</li>
           </ol>
           <button id="copyAppsScriptBtn" class="btn btn-secondary btn-sm">📋 Copiar Código do Google Apps Script</button>
         </details>

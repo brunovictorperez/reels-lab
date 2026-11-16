@@ -5,7 +5,13 @@ import {
   saveState,
   exportBackupJson,
   syncToGoogleDrive,
-  loadFromGoogleDrive
+  loadFromGoogleDrive,
+  getEffectiveDriveWebhook,
+  buildFilteredDriveState,
+  mergeDriveBackupState,
+  parseCreatorFieldItems,
+  addCreatorFieldItem,
+  removeCreatorFieldItem
 } from './storage.js';
 import {
   generateCompleteEpisode,
@@ -20,6 +26,7 @@ import { COVER_TEMPLATES, renderCoverCanvas, downloadDataUrl } from './cover-stu
 let state = null;
 let currentEditingEpisodeId = null;
 let currentCoverBgDataUrl = '';
+let lastAnalysisOriginalScript = '';
 let lastAnalysisImprovedScript = '';
 
 // Teleprompter state
@@ -300,9 +307,11 @@ function updateStatusIndicators() {
     aiText.textContent = 'IA: Local';
   }
 
+  const activeCreator = getActiveCreator();
+  const activeDriveUrl = getEffectiveDriveWebhook(state, activeCreator);
   const driveDot = document.getElementById('driveStatusDot');
   const driveText = document.getElementById('driveStatusText');
-  if (state.settings.driveWebhookUrl) {
+  if (activeDriveUrl) {
     driveDot.className = 'dot dot-ok';
     driveText.textContent = 'Drive Ativo';
   } else {
@@ -311,8 +320,9 @@ function updateStatusIndicators() {
   }
 
   const syncInfo = document.getElementById('driveLastSyncInfo');
-  if (state.settings.lastDriveSync) {
-    syncInfo.textContent = `Última sincronização: ${new Date(state.settings.lastDriveSync).toLocaleString('pt-BR')}`;
+  const lastSync = activeCreator?.driveLastSync || state.settings.lastDriveSync;
+  if (syncInfo) {
+    syncInfo.textContent = lastSync ? `Última sincronização deste perfil: ${new Date(lastSync).toLocaleString('pt-BR')}` : '';
   }
 }
 
@@ -350,15 +360,29 @@ function wireModals() {
   });
 
   document.getElementById('openDriveModalBtn').addEventListener('click', () => {
-    document.getElementById('m_driveUrl').value = state.settings.driveWebhookUrl || '';
+    const active = getActiveCreator();
+    const label = document.getElementById('driveProfileLabel');
+    if (label) label.textContent = `${active?.name || 'Criador Ativo'} (${active?.handle || '@perfil'})`;
+    document.getElementById('m_driveUrl').value = getEffectiveDriveWebhook(state, active);
+    document.getElementById('m_driveOnlyActiveCreator').checked = active?.driveOnlyActive !== false;
+    updateStatusIndicators();
     document.getElementById('driveModal').classList.remove('hidden');
   });
 
   document.getElementById('saveDriveUrlBtn').addEventListener('click', async () => {
-    state.settings.driveWebhookUrl = document.getElementById('m_driveUrl').value.trim();
+    const active = getActiveCreator();
+    const url = document.getElementById('m_driveUrl').value.trim();
+    const onlyActive = document.getElementById('m_driveOnlyActiveCreator').checked;
+    if (active) {
+      active.driveWebhookUrl = url;
+      active.driveOnlyActive = onlyActive;
+      if (active.id === state.creators[0]?.id) {
+        state.settings.driveWebhookUrl = url;
+      }
+    }
     await persist();
     updateStatusIndicators();
-    showToast('URL do Google Drive salva!', 'ok');
+    showToast(`URL do Google Drive salva para "${active?.name || 'Perfil'}"!`, 'ok');
   });
 
   document.getElementById('exportBackupBtn').addEventListener('click', () => {
@@ -391,19 +415,38 @@ function wireModals() {
   });
 
   document.getElementById('syncDriveNowBtn').addEventListener('click', async () => {
+    const active = getActiveCreator();
     const url = document.getElementById('m_driveUrl').value.trim();
-    state.settings.driveWebhookUrl = url;
+    const onlyActive = document.getElementById('m_driveOnlyActiveCreator').checked;
+    if (active) {
+      active.driveWebhookUrl = url;
+      active.driveOnlyActive = onlyActive;
+      if (active.id === state.creators[0]?.id) {
+        state.settings.driveWebhookUrl = url;
+      }
+    }
     await persist();
     const btn = document.getElementById('syncDriveNowBtn');
     btn.disabled = true;
     btn.textContent = '⏳ Sincronizando...';
     try {
-      const res = await syncToGoogleDrive(state, url);
-      state.settings.lastDriveSync = res.syncedAt || new Date().toISOString();
+      const payloadState = buildFilteredDriveState(state, active?.id, onlyActive);
+      const res = await syncToGoogleDrive(payloadState, url);
+      const syncedAt = res.syncedAt || new Date().toISOString();
+      if (active) {
+        active.driveLastSync = syncedAt;
+        active.driveFolderUrl = res.folderUrl || '';
+      }
+      state.settings.lastDriveSync = syncedAt;
       state.settings.driveFolderUrl = res.folderUrl || '';
       await persist();
       updateStatusIndicators();
-      showToast('Salvo na pasta "Reels Lab - Studio" do seu Google Drive!', 'ok');
+      showToast(
+        onlyActive
+          ? `Pasta de "${active?.name}" salva no Google Drive deste perfil!`
+          : 'Salvo na pasta "Reels Lab - Studio" do Google Drive!',
+        'ok'
+      );
     } catch (err) {
       showToast(err.message, 'err');
     } finally {
@@ -413,8 +456,13 @@ function wireModals() {
   });
 
   document.getElementById('loadDriveNowBtn').addEventListener('click', async () => {
+    const active = getActiveCreator();
     const url = document.getElementById('m_driveUrl').value.trim();
-    state.settings.driveWebhookUrl = url;
+    const onlyActive = document.getElementById('m_driveOnlyActiveCreator').checked;
+    if (active) {
+      active.driveWebhookUrl = url;
+      active.driveOnlyActive = onlyActive;
+    }
     await persist();
     const btn = document.getElementById('loadDriveNowBtn');
     btn.disabled = true;
@@ -422,12 +470,13 @@ function wireModals() {
     try {
       const res = await loadFromGoogleDrive(url);
       if (!res.found || !res.data) {
-        showToast('Nenhum backup encontrado no seu Google Drive ainda.', 'err');
+        showToast('Nenhum backup encontrado neste Google Drive ainda.', 'err');
       } else {
-        state = res.data;
-        state.settings.driveWebhookUrl = url;
-        if (!state.settings?.geminiModel || /gemini-2\.(0|5)-flash/i.test(state.settings.geminiModel)) {
-          state.settings.geminiModel = 'gemini-3.8-flash';
+        state = mergeDriveBackupState(state, res.data, active?.id, onlyActive);
+        const updatedActive = getActiveCreator();
+        if (updatedActive) {
+          updatedActive.driveWebhookUrl = url;
+          updatedActive.driveOnlyActive = onlyActive;
         }
         applyTheme(state.settings?.theme || 'light');
         await persist();
@@ -530,7 +579,11 @@ function wireCreatorTab() {
       product: '',
       manychatKeyword: 'QUERO',
       brandColor: '#8B5CF6',
-      visualStyle: 'Minimalista editorial estilo Apple, luz natural limpa'
+      visualStyle: 'Minimalista editorial estilo Apple, luz natural limpa',
+      driveWebhookUrl: '',
+      driveOnlyActive: true,
+      driveLastSync: null,
+      driveFolderUrl: ''
     });
     state.activeCreatorId = newId;
     await persist();
@@ -923,43 +976,44 @@ function renderQuickFillFactory() {
 
   if (chipsEl && creator) {
     const items = [];
-    const parseLines = (txt, typeLabel, modelId, funnel) => {
-      String(txt || '')
-        .split('\n')
-        .map((l) => l.replace(/^\d+[\.\)\-\s]+/, '').trim())
-        .filter(Boolean)
-        .forEach((line) => items.push({ label: typeLabel, text: line, modelId, funnel }));
-    };
-
-    parseLines(creator.pains, 'Dor', 'serie_03', 'topo');
-    parseLines(creator.desires, 'Desejo', 'serie_05', 'fundo');
-
-    if (creator.objections) {
-      String(creator.objections)
-        .split(/[,;\n]/)
-        .map((s) => s.replace(/["']/g, '').trim())
-        .filter((s) => s.length > 5)
-        .slice(0, 2)
-        .forEach((obj) => items.push({ label: 'Objeção', text: obj, modelId: 'codigo_viral', funnel: 'fundo' }));
-    }
+    parseCreatorFieldItems(creator.pains, 'pain').forEach((line) =>
+      items.push({ kind: 'pain', label: 'Dor', text: line, modelId: 'serie_03', funnel: 'topo' })
+    );
+    parseCreatorFieldItems(creator.desires, 'desire').forEach((line) =>
+      items.push({ kind: 'desire', label: 'Desejo', text: line, modelId: 'serie_05', funnel: 'fundo' })
+    );
+    parseCreatorFieldItems(creator.objections, 'objection').forEach((line) =>
+      items.push({ kind: 'objection', label: 'Objeção', text: line, modelId: 'codigo_viral', funnel: 'fundo' })
+    );
 
     if (!items.length) {
-      chipsEl.innerHTML = `<div class="muted-xs">Preencha as dores/desejos no DNA do Criador ou clique no botão abaixo para completar o perfil ativo.</div>`;
+      chipsEl.innerHTML = `<div class="muted-xs">Escreva uma dor ou desejo personalizado abaixo para salvar e usar na hora.</div>`;
     } else {
       chipsEl.innerHTML = items.map((it) => `
-        <button type="button" class="qf-chip" data-text="${escapeHtml(it.text)}" data-model="${it.modelId}" data-funnel="${it.funnel}">
-          <span class="qf-chip-tag">${escapeHtml(it.label)}</span>${escapeHtml(it.text)}
-        </button>
+        <div class="qf-chip-row">
+          <button type="button" class="qf-chip" data-kind="${it.kind}" data-text="${escapeHtml(it.text)}" data-model="${it.modelId}" data-funnel="${it.funnel}">
+            <span class="qf-chip-tag">${escapeHtml(it.label)}</span>${escapeHtml(it.text)}
+          </button>
+          <button type="button" class="qf-chip-del" data-kind="${it.kind}" data-text="${escapeHtml(it.text)}" title="Remover item">×</button>
+        </div>
       `).join('');
 
       chipsEl.querySelectorAll('.qf-chip').forEach((btn) => {
         btn.addEventListener('click', () => {
-          document.getElementById('f_topic').value = btn.dataset.text;
-          document.getElementById('f_modelSelect').value = btn.dataset.model;
-          document.getElementById('f_funnelStage').value = btn.dataset.funnel;
-          document.getElementById('f_qProblem').value = btn.dataset.text;
-          updateModelRuleHint();
+          applyQuickFillChoiceToFactory(btn.dataset.kind, btn.dataset.text, btn.dataset.model, btn.dataset.funnel);
           showToast('Tema do Criador Ativo preenchido na Fábrica!', 'ok');
+        });
+      });
+
+      chipsEl.querySelectorAll('.qf-chip-del').forEach((delBtn) => {
+        delBtn.addEventListener('click', async () => {
+          const active = getActiveCreator();
+          if (removeCreatorFieldItem(active, delBtn.dataset.kind, delBtn.dataset.text)) {
+            await persist();
+            loadCreatorIntoForm();
+            renderQuickFillFactory();
+            showToast('Item removido deste perfil.', 'ok');
+          }
         });
       });
     }
@@ -971,6 +1025,47 @@ function renderQuickFillFactory() {
     }
     renderQuickFillProfIdeas(profSel.value);
   }
+}
+
+function applyQuickFillChoiceToFactory(kind, text, modelId, funnelStage) {
+  document.getElementById('f_topic').value = text;
+  document.getElementById('f_modelSelect').value = modelId;
+  document.getElementById('f_funnelStage').value = funnelStage;
+  if (kind === 'desire') {
+    document.getElementById('f_qLifeChange').value = text;
+  } else {
+    document.getElementById('f_qProblem').value = text;
+  }
+  updateModelRuleHint();
+}
+
+async function handleAddCustomQuickFill() {
+  const inputEl = document.getElementById('qfCustomInput');
+  const typeEl = document.getElementById('qfCustomType');
+  const text = (inputEl?.value || '').trim();
+  const kind = typeEl?.value || 'pain';
+
+  if (!text) {
+    showToast('Escreva uma dor, desejo ou objeção antes de adicionar.', 'err');
+    inputEl?.focus();
+    return;
+  }
+
+  const preset = kind === 'desire'
+    ? { modelId: 'serie_05', funnel: 'fundo' }
+    : kind === 'objection'
+    ? { modelId: 'codigo_viral', funnel: 'fundo' }
+    : { modelId: 'serie_03', funnel: 'topo' };
+
+  const active = getActiveCreator();
+  addCreatorFieldItem(active, kind, text);
+  applyQuickFillChoiceToFactory(kind, text, preset.modelId, preset.funnel);
+
+  inputEl.value = '';
+  await persist();
+  loadCreatorIntoForm();
+  renderQuickFillFactory();
+  showToast('Item personalizado salvo no perfil e aplicado no roteiro!', 'ok');
 }
 
 function renderQuickFillProfIdeas(profId) {
@@ -1063,6 +1158,14 @@ function wireFactoryTab() {
 
   document.getElementById('qfProfSelect').addEventListener('change', (e) => {
     renderQuickFillProfIdeas(e.target.value);
+  });
+
+  document.getElementById('qfAddCustomBtn').addEventListener('click', handleAddCustomQuickFill);
+  document.getElementById('qfCustomInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      handleAddCustomQuickFill();
+    }
   });
 
   document.getElementById('qfFillFromCreatorBtn').addEventListener('click', () => {
@@ -1407,9 +1510,7 @@ function renderHeadlineChips(headlines) {
 }
 
 function updateScriptTimerBadge() {
-  const text = document.getElementById('o_script').value || '';
-  const words = text.replace(/\[.*?\]/g, '').trim().split(/\s+/).filter(Boolean).length;
-  const secs = Math.round(words / 2.3);
+  const { words, secs } = computeScriptMetrics(document.getElementById('o_script').value);
   const badge = document.getElementById('scriptTimerBadge');
   badge.textContent = `~${words} palavras • ~${secs}s`;
   badge.style.color = secs > 60 ? 'var(--red)' : 'var(--soft-accent)';
@@ -1565,6 +1666,69 @@ function clearFactoryFields() {
 // TAB 4: CLUBE DE ANÁLISE IA & TELEPROMPTER
 // ============================================================================
 
+function computeScriptMetrics(text) {
+  const words = String(text || '').replace(/\[.*?\]/g, '').trim().split(/\s+/).filter(Boolean).length;
+  return { words, secs: Math.round(words / 2.3) };
+}
+
+function buildWordDiffHtml(beforeText, afterText) {
+  const splitTokens = (s, byLine = false) =>
+    byLine
+      ? String(s || '').split(/(\n+)/).filter(Boolean)
+      : String(s || '').split(/(\s+)/).filter(Boolean);
+
+  let a = splitTokens(beforeText, false);
+  let b = splitTokens(afterText, false);
+  if (a.length * b.length > 250000) {
+    a = splitTokens(beforeText, true);
+    b = splitTokens(afterText, true);
+  }
+
+  const m = a.length;
+  const n = b.length;
+  const dp = Array.from({ length: m + 1 }, () => new Uint32Array(n + 1));
+  for (let i = m - 1; i >= 0; i--) {
+    for (let j = n - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? 1 + dp[i + 1][j + 1] : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+
+  let beforeHtml = '';
+  let afterHtml = '';
+  let i = 0;
+  let j = 0;
+
+  while (i < m || j < n) {
+    if (i < m && j < n && a[i] === b[j]) {
+      const safe = escapeHtml(a[i]);
+      beforeHtml += safe;
+      afterHtml += safe;
+      i++;
+      j++;
+    } else if (j < n && (i === m || dp[i][j + 1] >= dp[i + 1][j])) {
+      const tok = b[j++];
+      afterHtml += /^\s+$/.test(tok) ? escapeHtml(tok) : `<ins class="diff-add">${escapeHtml(tok)}</ins>`;
+    } else {
+      const tok = a[i++];
+      beforeHtml += /^\s+$/.test(tok) ? escapeHtml(tok) : `<del class="diff-del">${escapeHtml(tok)}</del>`;
+    }
+  }
+
+  return { beforeHtml, afterHtml };
+}
+
+function renderClubComparison(originalScript, improvedScript) {
+  const { beforeHtml, afterHtml } = buildWordDiffHtml(originalScript, improvedScript);
+  const bStats = computeScriptMetrics(originalScript);
+  const aStats = computeScriptMetrics(improvedScript);
+
+  document.getElementById('clubBeforeView').innerHTML = beforeHtml || '<span class="muted-xs">(vazio)</span>';
+  document.getElementById('clubAfterView').innerHTML = afterHtml || '<span class="muted-xs">(vazio)</span>';
+  document.getElementById('clubBeforeStats').textContent = `${bStats.words} pal. • ~${bStats.secs}s`;
+  document.getElementById('clubAfterStats').textContent = `${aStats.words} pal. • ~${aStats.secs}s`;
+  document.getElementById('clubAfterTextarea').value = improvedScript;
+}
+
 function wireClubAndTeleprompter() {
   document.getElementById('loadLastEpisodeClubBtn').addEventListener('click', () => {
     const script = document.getElementById('o_script').value;
@@ -1598,6 +1762,7 @@ function wireClubAndTeleprompter() {
       );
 
       document.getElementById('clubResultBox').classList.remove('hidden');
+      document.getElementById('clubDiffBox').classList.remove('hidden');
       document.getElementById('clubScoreValue').textContent = `${res.score}%`;
       const badge = document.getElementById('clubScoreBadge');
       badge.textContent = res.score >= 70 ? '✅ Passou no Filtro 70% — Pode Gravar!' : '⚠️ Abaixo de 70% — Ajuste antes de gravar';
@@ -1606,19 +1771,61 @@ function wireClubAndTeleprompter() {
       document.getElementById('clubKeepList').innerHTML = (res.keep || []).map((i) => `<li>${escapeHtml(i)}</li>`).join('');
       document.getElementById('clubAdjustList').innerHTML = (res.adjust || []).map((i) => `<li>${escapeHtml(i)}</li>`).join('');
       document.getElementById('clubBlockerList').innerHTML = (res.blockers || []).map((i) => `<li>${escapeHtml(i)}</li>`).join('');
+
+      lastAnalysisOriginalScript = script;
       lastAnalysisImprovedScript = res.improvedScript || script;
+
+      // Reset editor toggle to diff preview and populate side-by-side comparison
+      document.getElementById('clubAfterView').classList.remove('hidden');
+      document.getElementById('clubAfterTextarea').classList.add('hidden');
+      document.getElementById('toggleEditAfterBtn').textContent = '✏️ Editar texto final';
+      renderClubComparison(lastAnalysisOriginalScript, lastAnalysisImprovedScript);
     } catch (err) {
       showToast(err.message, 'err');
     }
   });
 
+  document.getElementById('toggleEditAfterBtn').addEventListener('click', () => {
+    const viewEl = document.getElementById('clubAfterView');
+    const taEl = document.getElementById('clubAfterTextarea');
+    const toggleBtn = document.getElementById('toggleEditAfterBtn');
+    const editing = !taEl.classList.contains('hidden');
+    if (editing) {
+      lastAnalysisImprovedScript = taEl.value;
+      renderClubComparison(lastAnalysisOriginalScript, lastAnalysisImprovedScript);
+      taEl.classList.add('hidden');
+      viewEl.classList.remove('hidden');
+      toggleBtn.textContent = '✏️ Editar texto final';
+    } else {
+      taEl.value = lastAnalysisImprovedScript;
+      viewEl.classList.add('hidden');
+      taEl.classList.remove('hidden');
+      toggleBtn.textContent = '👁️ Ver marcações';
+      taEl.focus();
+    }
+  });
+
+  document.getElementById('clubAfterTextarea').addEventListener('input', (e) => {
+    lastAnalysisImprovedScript = e.target.value;
+    const stats = computeScriptMetrics(lastAnalysisImprovedScript);
+    document.getElementById('clubAfterStats').textContent = `${stats.words} pal. • ~${stats.secs}s`;
+  });
+
   document.getElementById('applyClubFixBtn').addEventListener('click', () => {
-    if (!lastAnalysisImprovedScript) return;
-    document.getElementById('club_scriptInput').value = lastAnalysisImprovedScript;
-    document.getElementById('o_script').value = lastAnalysisImprovedScript;
+    const taEl = document.getElementById('clubAfterTextarea');
+    const approvedText = (!taEl.classList.contains('hidden') ? taEl.value : lastAnalysisImprovedScript) || '';
+    if (!approvedText.trim()) return;
+    lastAnalysisImprovedScript = approvedText;
+    document.getElementById('club_scriptInput').value = approvedText;
+    document.getElementById('o_script').value = approvedText;
     updateScriptTimerBadge();
-    updateTeleprompterText(lastAnalysisImprovedScript);
-    showToast('Roteiro otimizado aplicado na Fábrica e Teleprompter!', 'ok');
+    updateTeleprompterText(approvedText);
+    showToast('Versão otimizada aprovada e aplicada na Fábrica e Teleprompter!', 'ok');
+  });
+
+  document.getElementById('discardClubFixBtn').addEventListener('click', () => {
+    document.getElementById('clubDiffBox').classList.add('hidden');
+    showToast('Alterações descartadas — roteiro original mantido.', 'ok');
   });
 
   // Teleprompter controls

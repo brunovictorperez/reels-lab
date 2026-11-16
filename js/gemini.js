@@ -128,7 +128,8 @@ async function callGemini({ apiKey, modelName = 'gemini-3.8-flash', prompt, syst
     tried.add(model);
 
     if (typeof onStatus === 'function') {
-      onStatus(i === 0 ? `Conectando ao ${model}...` : `Alta demanda anterior — tentando ${model}...`);
+      const shortModel = model.replace(/^gemini-/, '');
+      onStatus(i === 0 ? `Gemini ${shortModel}...` : `Alternando p/ ${shortModel}...`);
     }
 
     try {

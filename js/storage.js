@@ -50,7 +50,11 @@ export function createDefaultState() {
         product: 'Acompanhamento Nutricional Leveza (Consultoria + Cardápio Flexível)',
         manychatKeyword: 'LEVEZA',
         brandColor: '#EC4899',
-        visualStyle: 'Estética editorial moderna, luz natural quente, fundo limpo com contraste forte para texto branco e destaque vibrante.'
+        visualStyle: 'Estética editorial moderna, luz natural quente, fundo limpo com contraste forte para texto branco e destaque vibrante.',
+        driveWebhookUrl: '',
+        driveOnlyActive: true,
+        driveLastSync: null,
+        driveFolderUrl: ''
       }
     ],
     series: [
@@ -188,16 +192,146 @@ function mergeDefaults(loaded) {
     mergedSettings.theme = 'light';
   }
 
+  const creators = Array.isArray(loaded.creators) && loaded.creators.length ? loaded.creators : def.creators;
+  // Migrate global Drive URL onto the first profile once so secondary profiles stay isolated
+  if (mergedSettings.driveWebhookUrl && creators[0] && !creators[0].driveWebhookUrl && creators.every((c) => !c.driveWebhookUrl)) {
+    creators[0] = {
+      ...creators[0],
+      driveWebhookUrl: mergedSettings.driveWebhookUrl,
+      driveLastSync: mergedSettings.lastDriveSync || null,
+      driveFolderUrl: mergedSettings.driveFolderUrl || '',
+      driveOnlyActive: creators[0].driveOnlyActive !== false
+    };
+  }
+
   return {
     ...def,
     ...loaded,
     settings: mergedSettings,
-    creators: Array.isArray(loaded.creators) && loaded.creators.length ? loaded.creators : def.creators,
+    creators: creators.map((c) => ({ ...c, driveOnlyActive: c.driveOnlyActive !== false })),
     series: Array.isArray(loaded.series) ? loaded.series : def.series,
     episodes: Array.isArray(loaded.episodes) ? loaded.episodes : def.episodes,
     schedule: loaded.schedule || def.schedule,
     hotTopicsCache: loaded.hotTopicsCache || {}
   };
+}
+
+export function getEffectiveDriveWebhook(state, creator) {
+  if (!state) return '';
+  if (creator && creator.driveWebhookUrl) return creator.driveWebhookUrl.trim();
+  // Global URL applies as fallback only for the primary creator so extra accounts don't collide
+  const firstId = state.creators?.[0]?.id;
+  if (!creator || creator.id === firstId) {
+    return (state.settings?.driveWebhookUrl || '').trim();
+  }
+  return '';
+}
+
+export function buildFilteredDriveState(state, creatorId, onlyActive = true) {
+  if (!onlyActive || !creatorId) return state;
+  const creator = (state.creators || []).find((c) => c.id === creatorId);
+  if (!creator) return state;
+
+  return {
+    ...state,
+    activeCreatorId: creatorId,
+    creators: [creator],
+    series: (state.series || []).filter((s) => s.creatorId === creatorId),
+    episodes: (state.episodes || []).filter((e) => e.creatorId === creatorId),
+    schedule: state.schedule?.[creatorId] ? { [creatorId]: state.schedule[creatorId] } : {},
+    hotTopicsCache: state.hotTopicsCache?.[creatorId] ? { [creatorId]: state.hotTopicsCache[creatorId] } : {}
+  };
+}
+
+export function mergeDriveBackupState(currentState, loadedState, activeCreatorId, onlyActive = true) {
+  if (!loadedState || !Array.isArray(loadedState.creators) || !loadedState.creators.length) {
+    return currentState;
+  }
+
+  // Single-profile restore keeps other local profiles intact
+  if (onlyActive && loadedState.creators.length === 1 && (currentState.creators || []).length > 1) {
+    const incomingCreator = loadedState.creators[0];
+    const targetId = currentState.creators.some((c) => c.id === incomingCreator.id)
+      ? incomingCreator.id
+      : (activeCreatorId || incomingCreator.id);
+
+    const updatedCreator = { ...incomingCreator, id: targetId };
+    const creators = currentState.creators.some((c) => c.id === targetId)
+      ? currentState.creators.map((c) => (c.id === targetId ? updatedCreator : c))
+      : [...currentState.creators, updatedCreator];
+
+    const series = [
+      ...(currentState.series || []).filter((s) => s.creatorId !== targetId),
+      ...(loadedState.series || []).map((s) => ({ ...s, creatorId: targetId }))
+    ];
+    const episodes = [
+      ...(currentState.episodes || []).filter((e) => e.creatorId !== targetId),
+      ...(loadedState.episodes || []).map((e) => ({ ...e, creatorId: targetId }))
+    ];
+    const schedule = { ...(currentState.schedule || {}) };
+    if (loadedState.schedule?.[incomingCreator.id]) {
+      schedule[targetId] = loadedState.schedule[incomingCreator.id];
+    }
+    const hotTopicsCache = { ...(currentState.hotTopicsCache || {}) };
+    if (loadedState.hotTopicsCache?.[incomingCreator.id]) {
+      hotTopicsCache[targetId] = loadedState.hotTopicsCache[incomingCreator.id];
+    }
+
+    return mergeDefaults({
+      ...currentState,
+      activeCreatorId: targetId,
+      creators,
+      series,
+      episodes,
+      schedule,
+      hotTopicsCache
+    });
+  }
+
+  return mergeDefaults(loadedState);
+}
+
+const CREATOR_FIELD_MAP = { pain: 'pains', desire: 'desires', objection: 'objections' };
+
+export function parseCreatorFieldItems(rawText, kind = 'pain') {
+  const txt = String(rawText || '').trim();
+  if (!txt) return [];
+  const splitter = kind === 'objection' ? /[,;\n]+/ : /\n+/;
+  return txt
+    .split(splitter)
+    .map((line) => line.replace(/^\d+[\.\)\-\s]+/, '').replace(/^["']|["']$/g, '').trim())
+    .filter(Boolean);
+}
+
+export function addCreatorFieldItem(creator, kind, value) {
+  const field = CREATOR_FIELD_MAP[kind];
+  const clean = String(value || '').trim();
+  if (!creator || !field || !clean) return false;
+
+  const existing = parseCreatorFieldItems(creator[field], kind);
+  if (existing.some((item) => item.toLowerCase() === clean.toLowerCase())) {
+    return false;
+  }
+  const next = [...existing, clean];
+  creator[field] = kind === 'objection'
+    ? next.map((s) => `"${s}"`).join(', ')
+    : next.map((s, i) => `${i + 1}. ${s}`).join('\n');
+  return true;
+}
+
+export function removeCreatorFieldItem(creator, kind, value) {
+  const field = CREATOR_FIELD_MAP[kind];
+  const target = String(value || '').trim().toLowerCase();
+  if (!creator || !field || !target) return false;
+
+  const existing = parseCreatorFieldItems(creator[field], kind);
+  const filtered = existing.filter((item) => item.toLowerCase() !== target);
+  if (filtered.length === existing.length) return false;
+
+  creator[field] = kind === 'objection'
+    ? filtered.map((s) => `"${s}"`).join(', ')
+    : filtered.map((s, i) => `${i + 1}. ${s}`).join('\n');
+  return true;
 }
 
 export async function saveState(state) {
