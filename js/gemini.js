@@ -40,16 +40,97 @@ function cleanJsonResponse(text) {
   return JSON.parse(cleaned.slice(start, end + 1));
 }
 
-async function callGemini({ apiKey, modelName = 'gemini-3.8-flash', prompt, systemInstruction = '', useSearch = false, expectJson = true }) {
+const REQUEST_TIMEOUT_MS = 20000;
+let discoveredModelsCache = { key: '', models: [] };
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (err) {
+    if (err?.name === 'AbortError') {
+      throw new Error(`Tempo limite (${Math.round(timeoutMs / 1000)}s) excedido por alta demanda no servidor do Google.`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function isInvalidKeyError(status, msg) {
+  return (status === 400 || status === 401 || status === 403) &&
+    /api_key_invalid|api key not valid|invalid api key|key expired|permission_denied/i.test(msg);
+}
+
+function isTransientServiceError(err) {
+  const msg = String(err?.message || '');
+  return Boolean(err?.transient) ||
+    /high demand|overloaded|unavailable|try again|temporarily|quota|rate limit|resource_exhausted|tempo limite|timeout|aborted|failed to fetch|network|503|429|500|502|504/i.test(msg);
+}
+
+async function discoverActiveGeminiModels(apiKey) {
+  if (!apiKey) return [];
+  if (discoveredModelsCache.key === apiKey && discoveredModelsCache.models.length) {
+    return discoveredModelsCache.models;
+  }
+  try {
+    const res = await fetchWithTimeout(`${BASE_URL}?key=${encodeURIComponent(apiKey)}`, { method: 'GET' }, 8000);
+    if (!res.ok) return [];
+    const data = await res.json();
+    const list = (data?.models || [])
+      .filter((m) => Array.isArray(m.supportedGenerationMethods) && m.supportedGenerationMethods.includes('generateContent'))
+      .map((m) => String(m.name || '').replace(/^models\//, ''))
+      .filter((name) =>
+        name &&
+        /^gemini-/i.test(name) &&
+        !/embedding|aqa|tts|image|vision|1\.0|1\.5|2\.0-flash(?:-|$)/i.test(name)
+      );
+
+    // Prioritize fast/lite models to dodge high-demand queues
+    list.sort((a, b) => {
+      const score = (n) =>
+        (/lite/i.test(n) ? 0 : /flash/i.test(n) ? 1 : 2) +
+        (/3\.8/i.test(n) ? 0 : /3\./i.test(n) ? 3 : /2\.5/i.test(n) ? 6 : 9);
+      return score(a) - score(b);
+    });
+
+    discoveredModelsCache = { key: apiKey, models: list };
+    return list;
+  } catch {
+    return [];
+  }
+}
+
+async function callGemini({ apiKey, modelName = 'gemini-3.8-flash', prompt, systemInstruction = '', useSearch = false, expectJson = true, onStatus = null }) {
   if (!apiKey) {
     throw new Error('NO_API_KEY');
   }
 
   const sanitizedPreferred = (!modelName || modelName === 'gemini-2.0-flash') ? 'gemini-3.8-flash' : modelName;
-  const modelsToTry = [sanitizedPreferred, 'gemini-3.8-flash', 'gemini-3.8-pro', 'gemini-2.5-flash'].filter((v, i, a) => v && a.indexOf(v) === i);
+  const baseQueue = [
+    sanitizedPreferred,
+    'gemini-3.8-flash',
+    'gemini-3.8-flash-lite',
+    'gemini-2.5-flash',
+    'gemini-2.5-flash-lite',
+    'gemini-3.8-pro'
+  ].filter((v, i, a) => v && a.indexOf(v) === i);
+
+  const tried = new Set();
+  const queue = [...baseQueue];
+  let didDiscover = false;
   let lastError = null;
 
-  for (const model of modelsToTry) {
+  for (let i = 0; i < queue.length; i++) {
+    const model = queue[i];
+    if (!model || tried.has(model)) continue;
+    tried.add(model);
+
+    if (typeof onStatus === 'function') {
+      onStatus(i === 0 ? `Conectando ao ${model}...` : `Alta demanda anterior — tentando ${model}...`);
+    }
+
     try {
       const body = {
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
@@ -67,31 +148,41 @@ async function callGemini({ apiKey, modelName = 'gemini-3.8-flash', prompt, syst
         body.generationConfig.responseMimeType = 'application/json';
       }
 
-      const res = await fetch(`${BASE_URL}/${model}:generateContent?key=${encodeURIComponent(apiKey)}`, {
+      const res = await fetchWithTimeout(`${BASE_URL}/${model}:generateContent?key=${encodeURIComponent(apiKey)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
-      });
+      }, REQUEST_TIMEOUT_MS);
 
       const data = await res.json();
       if (!res.ok) {
         const msg = data?.error?.message || `HTTP ${res.status}`;
-        // If search tool is unsupported on a model/tier, let caller handle fallback or try next model
-        if (useSearch && /search|tool/i.test(msg)) {
-          lastError = new Error(msg);
-          continue;
+        if (isInvalidKeyError(res.status, msg)) {
+          throw Object.assign(new Error(msg), { fatal: true });
         }
-        // Only fall back to secondary models when the model itself is unavailable/deprecated/not found
-        if (/not found|no longer available|deprecated|not supported|404/i.test(msg) || res.status === 404) {
-          lastError = new Error(msg);
-          continue;
+
+        const errObj = Object.assign(new Error(msg), {
+          transient: res.status === 503 || res.status === 429 || res.status >= 500 ||
+            /high demand|overloaded|unavailable|try again|temporarily|quota|rate limit|resource_exhausted/i.test(msg)
+        });
+        lastError = errObj;
+
+        if (!didDiscover) {
+          didDiscover = true;
+          const discovered = await discoverActiveGeminiModels(apiKey);
+          discovered.forEach((dm) => {
+            if (!tried.has(dm) && !queue.includes(dm)) queue.push(dm);
+          });
         }
-        // Fail fast on auth, billing, quota or validation errors so user sees the exact reason
-        throw Object.assign(new Error(msg), { fatal: true });
+        continue;
       }
 
       const candidate = data?.candidates?.[0];
       const text = (candidate?.content?.parts || []).map((p) => p.text || '').join('\n').trim();
+      if (!text) {
+        lastError = new Error(`Resposta vazia de ${model}.`);
+        continue;
+      }
       const groundingChunks = candidate?.groundingMetadata?.groundingChunks || [];
       const sources = groundingChunks
         .map((c) => c?.web ? { title: c.web.title, uri: c.web.uri } : null)
@@ -99,8 +190,16 @@ async function callGemini({ apiKey, modelName = 'gemini-3.8-flash', prompt, syst
 
       return { text, modelUsed: model, sources };
     } catch (err) {
-      lastError = err;
-      if (err?.fatal) break;
+      if (err?.fatal) throw err;
+      lastError = Object.assign(err, { transient: true });
+
+      if (!didDiscover) {
+        didDiscover = true;
+        const discovered = await discoverActiveGeminiModels(apiKey);
+        discovered.forEach((dm) => {
+          if (!tried.has(dm) && !queue.includes(dm)) queue.push(dm);
+        });
+      }
     }
   }
 
@@ -122,7 +221,8 @@ export async function generateCompleteEpisode(params) {
     viralGoal = 'share',
     validation = {},
     apiKey,
-    modelName
+    modelName,
+    onStatus = null
   } = params;
 
   const modelObj = SERIES_MODELS.find((m) => m.id === modelId) || SERIES_MODELS[0];
@@ -183,9 +283,21 @@ Retorne EXATAMENTE um JSON com esta estrutura:
   "coverImagePrompt": "Prompt em português (rico em detalhes visuais, iluminação, enquadramento vertical 9:16 com espaço limpo no topo/centro para texto) para gerar a imagem de fundo da capa por IA."
 }`;
 
-  const { text, modelUsed } = await callGemini({ apiKey, modelName, prompt, systemInstruction, expectJson: true });
-  const parsed = cleanJsonResponse(text);
-  return { ...parsed, generatedBy: `IA (${modelUsed})` };
+  try {
+    const { text, modelUsed } = await callGemini({ apiKey, modelName, prompt, systemInstruction, expectJson: true, onStatus });
+    const parsed = cleanJsonResponse(text);
+    return { ...parsed, generatedBy: `IA (${modelUsed})` };
+  } catch (err) {
+    if (!err?.fatal && isTransientServiceError(err)) {
+      const offline = buildOfflineEpisode({ creator, modelObj, seriesName, partNumber, topic, funnelObj, hierarchyObj, validation });
+      return {
+        ...offline,
+        generatedBy: 'Motor Inteligente de Contingência (Pico de demanda no Google Gemini)',
+        fallbackReason: err.message
+      };
+    }
+    throw err;
+  }
 }
 
 function buildOfflineEpisode({ creator, modelObj, seriesName, partNumber, topic, funnelObj, hierarchyObj, validation }) {
@@ -257,20 +369,24 @@ Porque ${pronoun} pode ter certeza: não é falta de tempo nem de capacidade, é
 // 2. GERADOR DE 5 IDEIAS DE EPISÓDIOS PARA A SÉRIE
 // ============================================================================
 
-export async function generateSeriesIdeas({ creator, modelId, seriesName, existingTitles = [], apiKey, modelName }) {
+function buildOfflineSeriesIdeas(creator, generatedBy = 'Sugestões Locais') {
+  return {
+    ideas: [
+      { topic: `O erro silencioso número 1 em ${creator?.niche || 'sua área'} que atrasa seus resultados`, problem: 'Hábito automático errado', learn: 'Como substituir em 2 minutos', lifeChange: 'Resultado visível já na semana' },
+      { topic: `O ajuste de 5 minutos antes de começar a semana`, problem: 'Falta de organização prática', learn: 'Checklist rápido de domingo', lifeChange: 'Zero correria na segunda-feira' },
+      { topic: `O mito que te contaram sobre ${creator?.product || 'seu objetivo'}`, problem: 'Crença limitante comum', learn: 'O que realmente funciona na prática', lifeChange: 'Economiza tempo e dinheiro' },
+      { topic: `O que fazer quando você acha que não tem tempo para isso`, problem: 'Rotina apertada', learn: 'Versão mínima viável do hábito', lifeChange: 'Mantém constância mesmo nos dias difíceis' },
+      { topic: `A dúvida que todo mundo me manda no WhatsApp sobre isso`, problem: 'Insegurança na execução', learn: 'Passo claro de aplicação', lifeChange: 'Mais confiança para agir hoje' }
+    ],
+    generatedBy
+  };
+}
+
+export async function generateSeriesIdeas({ creator, modelId, seriesName, existingTitles = [], apiKey, modelName, onStatus = null }) {
   const modelObj = SERIES_MODELS.find((m) => m.id === modelId) || SERIES_MODELS[0];
 
   if (!apiKey) {
-    return {
-      ideas: [
-        { topic: `O erro silencioso número 1 em ${creator?.niche || 'sua área'} que atrasa seus resultados`, problem: 'Hábito automático errado', learn: 'Como substituir em 2 minutos', lifeChange: 'Resultado visível já na semana' },
-        { topic: `O ajuste de 5 minutos antes de começar a semana`, problem: 'Falta de organização prática', learn: 'Checklist rápido de domingo', lifeChange: 'Zero correria na segunda-feira' },
-        { topic: `O mito que te contaram sobre ${creator?.product || 'seu objetivo'}`, problem: 'Crença limitante comum', learn: 'O que realmente funciona na prática', lifeChange: 'Economiza tempo e dinheiro' },
-        { topic: `O que fazer quando você acha que não tem tempo para isso`, problem: 'Rotina apertada', learn: 'Versão mínima viável do hábito', lifeChange: 'Mantém constância mesmo nos dias difíceis' },
-        { topic: `A dúvida que todo mundo me manda no WhatsApp sobre isso`, problem: 'Insegurança na execução', learn: 'Passo claro de aplicação', lifeChange: 'Mais confiança para agir hoje' }
-      ],
-      generatedBy: 'Sugestões Locais'
-    };
+    return buildOfflineSeriesIdeas(creator);
   }
 
   const prompt = `Com base no DNA do criador abaixo e no modelo de série "${modelObj.code}: ${modelObj.name}" (Série chamada "${seriesName}"), crie 5 ideias inéditas de próximos episódios (Partes) para essa série.
@@ -290,55 +406,69 @@ Retorne EXATAMENTE um JSON:
   ]
 }`;
 
-  const { text, modelUsed } = await callGemini({ apiKey, modelName, prompt, expectJson: true });
-  const parsed = cleanJsonResponse(text);
-  return { ...parsed, generatedBy: `IA (${modelUsed})` };
+  try {
+    const { text, modelUsed } = await callGemini({ apiKey, modelName, prompt, expectJson: true, onStatus });
+    const parsed = cleanJsonResponse(text);
+    return { ...parsed, generatedBy: `IA (${modelUsed})` };
+  } catch (err) {
+    if (!err?.fatal && isTransientServiceError(err)) {
+      return {
+        ...buildOfflineSeriesIdeas(creator, 'Sugestões Inteligentes de Contingência (Pico de demanda no Gemini)'),
+        fallbackReason: err.message
+      };
+    }
+    throw err;
+  }
 }
 
 // ============================================================================
 // 3. RADAR DE TEMAS QUENTES (TIMING + PESQUISA GOOGLE)
 // ============================================================================
 
-export async function searchHotTopics({ creator, focusQuery = '', apiKey, modelName }) {
+function buildOfflineHotTopics(creator, generatedBy = 'Modo Demonstração (Configure sua chave Gemini para buscar notícias reais do Google)') {
+  return {
+    topics: [
+      {
+        trendTitle: 'Mudanças nos hábitos digitais e excesso de telas / rotina acelerada',
+        timingWhy: 'Assunto altamente comentado nas redes hoje sobre produtividade, cansaço e busca por praticidade.',
+        bubbleBridge: `Conectar o cansaço atual com soluções rápidas dentro de ${creator?.niche || 'seu nicho'}.`,
+        angles: [
+          { funnel: 'topo', modelId: 'serie_03', title: `${creator?.targetGroupPrefix || 'A pessoa que'} passa horas rolando o feed procurando solução e nunca aplica` },
+          { funnel: 'meio', modelId: 'serie_04', title: `Como resolver isso em 10 minutos por dia sem complicar sua rotina` },
+          { funnel: 'fundo', modelId: 'serie_05', title: `Quem quer resultado real com ${creator?.product || 'acompanhamento'} deveria fazer isso aqui` }
+        ]
+      },
+      {
+        trendTitle: 'Polêmica das "dicas milagrosas" que viralizam no TikTok / Reels',
+        timingWhy: 'Vídeos desmentindo modinhas da internet têm altíssima taxa de compartilhamento e comentários.',
+        bubbleBridge: `Usar sua autoridade em ${creator?.niche || 'sua profissão'} para mostrar o que é mito vs. o que funciona.`,
+        angles: [
+          { funnel: 'topo', modelId: 'codigo_viral', title: `A maior mentira que estão contando sobre ${creator?.niche || 'isso'} essa semana` },
+          { funnel: 'meio', modelId: 'serie_01', title: `O que toda pessoa que vê dica na internet deveria conferir antes, mas não confere` },
+          { funnel: 'fundo', modelId: 'serie_02', title: `Comece a aplicar esse critério simples antes de gastar dinheiro errado` }
+        ]
+      },
+      {
+        trendTitle: 'Tendência de "Economia Inteligente / Fazer Melhor com Menos"',
+        timingWhy: 'As pessoas estão buscando formas práticas de evitar desperdício de tempo e dinheiro agora.',
+        bubbleBridge: `Mostrar como a sua metodologia evita erros caros no dia a dia da persona.`,
+        angles: [
+          { funnel: 'topo', modelId: 'serie_04', title: `Como ter resultado em ${creator?.niche || 'sua meta'} sem gastar rios de dinheiro` },
+          { funnel: 'meio', modelId: 'serie_03', title: `${creator?.targetGroupPrefix || 'A pessoa que'} tenta economizar cortando o essencial não deveria estranhar depois` },
+          { funnel: 'fundo', modelId: 'serie_05', title: `Quem quer parar de jogar dinheiro fora deveria fazer isso aqui` }
+        ]
+      }
+    ],
+    sources: [],
+    generatedBy
+  };
+}
+
+export async function searchHotTopics({ creator, focusQuery = '', apiKey, modelName, onStatus = null }) {
   const today = new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' });
 
   if (!apiKey) {
-    return {
-      topics: [
-        {
-          trendTitle: 'Mudanças nos hábitos digitais e excesso de telas / rotina acelerada',
-          timingWhy: 'Assunto altamente comentado nas redes hoje sobre produtividade, cansaço e busca por praticidade.',
-          bubbleBridge: `Conectar o cansaço atual com soluções rápidas dentro de ${creator?.niche || 'seu nicho'}.`,
-          angles: [
-            { funnel: 'topo', modelId: 'serie_03', title: `${creator?.targetGroupPrefix || 'A pessoa que'} passa horas rolando o feed procurando solução e nunca aplica` },
-            { funnel: 'meio', modelId: 'serie_04', title: `Como resolver isso em 10 minutos por dia sem complicar sua rotina` },
-            { funnel: 'fundo', modelId: 'serie_05', title: `Quem quer resultado real com ${creator?.product || 'acompanhamento'} deveria fazer isso aqui` }
-          ]
-        },
-        {
-          trendTitle: 'Polêmica das "dicas milagrosas" que viralizam no TikTok / Reels',
-          timingWhy: 'Vídeos desmentindo modinhas da internet têm altíssima taxa de compartilhamento e comentários.',
-          bubbleBridge: `Usar sua autoridade em ${creator?.niche || 'sua profissão'} para mostrar o que é mito vs. o que funciona.`,
-          angles: [
-            { funnel: 'topo', modelId: 'codigo_viral', title: `A maior mentira que estão contando sobre ${creator?.niche || 'isso'} essa semana` },
-            { funnel: 'meio', modelId: 'serie_01', title: `O que toda pessoa que vê dica na internet deveria conferir antes, mas não confere` },
-            { funnel: 'fundo', modelId: 'serie_02', title: `Comece a aplicar esse critério simples antes de gastar dinheiro errado` }
-          ]
-        },
-        {
-          trendTitle: 'Tendência de "Economia Inteligente / Fazer Melhor com Menos"',
-          timingWhy: 'As pessoas estão buscando formas práticas de evitar desperdício de tempo e dinheiro agora.',
-          bubbleBridge: `Mostrar como a sua metodologia evita erros caros no dia a dia da persona.`,
-          angles: [
-            { funnel: 'topo', modelId: 'serie_04', title: `Como ter resultado em ${creator?.niche || 'sua meta'} sem gastar rios de dinheiro` },
-            { funnel: 'meio', modelId: 'serie_03', title: `${creator?.targetGroupPrefix || 'A pessoa que'} tenta economizar cortando o essencial não deveria estranhar depois` },
-            { funnel: 'fundo', modelId: 'serie_05', title: `Quem quer parar de jogar dinheiro fora deveria fazer isso aqui` }
-          ]
-        }
-      ],
-      sources: [],
-      generatedBy: 'Modo Demonstração (Configure sua chave Gemini para buscar notícias reais do Google)'
-    };
+    return buildOfflineHotTopics(creator);
   }
 
   const prompt = `Hoje é ${today}.
@@ -372,21 +502,34 @@ Responda APENAS com um JSON válido no formato:
       modelName,
       prompt,
       useSearch: true,
-      expectJson: false
+      expectJson: false,
+      onStatus
     });
     const parsed = cleanJsonResponse(text);
     return { ...parsed, sources, generatedBy: `Google Search + IA (${modelUsed})` };
   } catch (err) {
-    // Fallback without googleSearch tool in case the user's tier/model restricts search grounding
-    const { text, modelUsed } = await callGemini({
-      apiKey,
-      modelName,
-      prompt,
-      useSearch: false,
-      expectJson: true
-    });
-    const parsed = cleanJsonResponse(text);
-    return { ...parsed, sources: [], generatedBy: `IA (${modelUsed})` };
+    if (err?.fatal) throw err;
+    try {
+      // Fallback without googleSearch tool in case the user's tier/model restricts search grounding
+      const { text, modelUsed } = await callGemini({
+        apiKey,
+        modelName,
+        prompt,
+        useSearch: false,
+        expectJson: true,
+        onStatus
+      });
+      const parsed = cleanJsonResponse(text);
+      return { ...parsed, sources: [], generatedBy: `IA (${modelUsed})` };
+    } catch (innerErr) {
+      if (!innerErr?.fatal && isTransientServiceError(innerErr)) {
+        return {
+          ...buildOfflineHotTopics(creator, 'Radar de Contingência (Pico de demanda no Gemini — tente novamente mais tarde)'),
+          fallbackReason: innerErr.message
+        };
+      }
+      throw innerErr;
+    }
   }
 }
 
@@ -394,7 +537,7 @@ Responda APENAS com um JSON válido no formato:
 // 4. CLUBE DE ANÁLISE IA (EXTRA 3 + RETENÇÃO DO CÓDIGO VIRAL)
 // ============================================================================
 
-export async function analyzeScript({ script, creator, modelId = 'serie_03', apiKey, modelName }) {
+export async function analyzeScript({ script, creator, modelId = 'serie_03', apiKey, modelName, onStatus = null }) {
   if (!apiKey) {
     return analyzeScriptOffline(script, creator);
   }
@@ -429,9 +572,21 @@ Retorne EXATAMENTE este JSON:
   "improvedScript": "Versão reescrita e otimizada do roteiro aplicando todos os ajustes acima, mantendo o formato com marcações de tempo [00-03s], pronto para gravar."
 }`;
 
-  const { text, modelUsed } = await callGemini({ apiKey, modelName, prompt, expectJson: true });
-  const parsed = cleanJsonResponse(text);
-  return { ...parsed, generatedBy: `Clube IA (${modelUsed})` };
+  try {
+    const { text, modelUsed } = await callGemini({ apiKey, modelName, prompt, expectJson: true, onStatus });
+    const parsed = cleanJsonResponse(text);
+    return { ...parsed, generatedBy: `Clube IA (${modelUsed})` };
+  } catch (err) {
+    if (!err?.fatal && isTransientServiceError(err)) {
+      const offline = analyzeScriptOffline(script, creator);
+      return {
+        ...offline,
+        generatedBy: 'Análise Local de Contingência (Pico de demanda no Gemini)',
+        fallbackReason: err.message
+      };
+    }
+    throw err;
+  }
 }
 
 function analyzeScriptOffline(script, creator) {
@@ -517,14 +672,14 @@ export async function generateCoverBackground({ imagePrompt, apiKey }) {
 
   // 1. Try Imagen 3 endpoint
   try {
-    const res = await fetch(`${BASE_URL}/imagen-3.0-generate-002:predict?key=${encodeURIComponent(apiKey)}`, {
+    const res = await fetchWithTimeout(`${BASE_URL}/imagen-3.0-generate-002:predict?key=${encodeURIComponent(apiKey)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         instances: [{ prompt: `${imagePrompt}. Vertical 9:16 aspect ratio, clean high contrast studio lighting, NO text or words in the image.` }],
         parameters: { sampleCount: 1, aspectRatio: '9:16' }
       })
-    });
+    }, 25000);
     if (res.ok) {
       const data = await res.json();
       const b64 = data?.predictions?.[0]?.bytesBase64Encoded;
@@ -536,7 +691,7 @@ export async function generateCoverBackground({ imagePrompt, apiKey }) {
   const imgModels = ['gemini-3.8-flash', 'gemini-2.5-flash-image'];
   for (const m of imgModels) {
     try {
-      const res = await fetch(`${BASE_URL}/${m}:generateContent?key=${encodeURIComponent(apiKey)}`, {
+      const res = await fetchWithTimeout(`${BASE_URL}/${m}:generateContent?key=${encodeURIComponent(apiKey)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -548,7 +703,7 @@ export async function generateCoverBackground({ imagePrompt, apiKey }) {
             responseModalities: ['IMAGE', 'TEXT']
           }
         })
-      });
+      }, 25000);
       if (!res.ok) continue;
       const data = await res.json();
       const parts = data?.candidates?.[0]?.content?.parts || [];
@@ -567,7 +722,7 @@ export async function generateCoverBackground({ imagePrompt, apiKey }) {
 // 6. PREENCHIMENTO RÁPIDO DO DNA DO CRIADOR ATIVO (IA + FALLBACK LOCAL)
 // ============================================================================
 
-export async function generateCreatorDnaQuickFill({ creator, apiKey, modelName }) {
+export async function generateCreatorDnaQuickFill({ creator, apiKey, modelName, onStatus = null }) {
   const niche = (creator?.niche || '').trim() || 'Criação de Conteúdo e Posicionamento Digital';
   const name = (creator?.name || '').trim() || 'Criador(a)';
   const hintPositioning = (creator?.positioning || '').trim();
@@ -612,9 +767,21 @@ Retorne EXATAMENTE este JSON válido (em português natural do Brasil, sem jarg�
   ]
 }`;
 
-  const { text, modelUsed } = await callGemini({ apiKey, modelName, prompt, expectJson: true });
-  const parsed = cleanJsonResponse(text);
-  return { ...parsed, generatedBy: `IA (${modelUsed})` };
+  try {
+    const { text, modelUsed } = await callGemini({ apiKey, modelName, prompt, expectJson: true, onStatus });
+    const parsed = cleanJsonResponse(text);
+    return { ...parsed, generatedBy: `IA (${modelUsed})` };
+  } catch (err) {
+    if (!err?.fatal && isTransientServiceError(err)) {
+      const offline = buildOfflineCreatorDna({ name, niche, hintPositioning, hintAudience, hintProduct });
+      return {
+        ...offline,
+        generatedBy: 'Motor Inteligente de Contingência (Pico de demanda no Google Gemini)',
+        fallbackReason: err.message
+      };
+    }
+    throw err;
+  }
 }
 
 function buildOfflineCreatorDna({ name, niche, hintPositioning, hintAudience, hintProduct }) {

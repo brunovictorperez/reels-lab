@@ -127,7 +127,43 @@ function showToast(msg, type = 'info') {
   box.appendChild(el);
   setTimeout(() => {
     el.remove();
-  }, 3800);
+  }, 4400);
+}
+
+async function runWithStatusTicker(buttons, initialStatus, asyncFn) {
+  const list = (Array.isArray(buttons) ? buttons : [buttons]).filter(Boolean);
+  const snapshots = list.map((b) => ({ el: b, html: b.innerHTML }));
+  let currentStatus = initialStatus;
+  let elapsed = 0;
+
+  const renderLabel = () => {
+    const label = elapsed > 0 ? `⏳ ${elapsed}s · ${currentStatus}` : `⏳ ${currentStatus}`;
+    list.forEach((b) => {
+      b.disabled = true;
+      b.textContent = label;
+    });
+  };
+
+  renderLabel();
+  const timer = setInterval(() => {
+    elapsed += 1;
+    renderLabel();
+  }, 1000);
+
+  try {
+    return await asyncFn((nextStatus) => {
+      if (nextStatus) {
+        currentStatus = nextStatus;
+        renderLabel();
+      }
+    });
+  } finally {
+    clearInterval(timer);
+    snapshots.forEach(({ el, html }) => {
+      el.disabled = false;
+      el.innerHTML = html;
+    });
+  }
 }
 
 function escapeHtml(str) {
@@ -562,18 +598,16 @@ async function handleQuickFillActiveCreator() {
     document.getElementById('quickFillActiveCreatorBtn'),
     document.getElementById('factoryQuickFillDnaBtn')
   ].filter(Boolean);
-  btns.forEach((b) => {
-    b.disabled = true;
-    b.dataset.orig = b.textContent;
-    b.textContent = '⏳ Gerando DNA do Criador...';
-  });
 
   try {
-    const filled = await generateCreatorDnaQuickFill({
-      creator,
-      apiKey: state.settings.geminiKey,
-      modelName: state.settings.geminiModel
-    });
+    const filled = await runWithStatusTicker(btns, 'Gerando DNA do Criador...', (onStatus) =>
+      generateCreatorDnaQuickFill({
+        creator,
+        apiKey: state.settings.geminiKey,
+        modelName: state.settings.geminiModel,
+        onStatus
+      })
+    );
 
     creator.niche = filled.niche || creator.niche;
     creator.positioning = filled.positioning || creator.positioning;
@@ -630,14 +664,10 @@ async function handleQuickFillActiveCreator() {
 
     await persist();
     refreshAllUI();
-    showToast(`DNA de "${creator.name}" completado (${filled.generatedBy}) + ${addedSeries} séries criadas!`, 'ok');
+    const note = filled.fallbackReason ? ' (Gemini congestionado no Google — contingência aplicada)' : '';
+    showToast(`DNA de "${creator.name}" completado (${filled.generatedBy}) + ${addedSeries} séries!${note}`, 'ok');
   } catch (err) {
     showToast(`Erro no preenchimento rápido: ${err.message}`, 'err');
-  } finally {
-    btns.forEach((b) => {
-      b.disabled = false;
-      if (b.dataset.orig) b.textContent = b.dataset.orig;
-    });
   }
 }
 
@@ -733,16 +763,17 @@ function wireRadarTab() {
   document.getElementById('searchTrendsBtn').addEventListener('click', async () => {
     const btn = document.getElementById('searchTrendsBtn');
     const query = document.getElementById('radarQueryInput').value.trim();
-    btn.disabled = true;
-    btn.innerHTML = '⏳ Pesquisando tendências &amp; conectando ao seu nicho...';
 
     try {
-      const result = await searchHotTopics({
-        creator: getActiveCreator(),
-        focusQuery: query,
-        apiKey: state.settings.geminiKey,
-        modelName: state.settings.geminiModel
-      });
+      const result = await runWithStatusTicker(btn, 'Pesquisando tendências & conectando ao nicho...', (onStatus) =>
+        searchHotTopics({
+          creator: getActiveCreator(),
+          focusQuery: query,
+          apiKey: state.settings.geminiKey,
+          modelName: state.settings.geminiModel,
+          onStatus
+        })
+      );
 
       const cId = getActiveCreator().id;
       state.hotTopicsCache[cId] = result;
@@ -751,9 +782,6 @@ function wireRadarTab() {
       showToast('Radar atualizado com sugestões virais!', 'ok');
     } catch (err) {
       showToast(`Erro no Radar: ${err.message}`, 'err');
-    } finally {
-      btn.disabled = false;
-      btn.innerHTML = '<span>🔍 Buscar Notícias &amp; Gerar Ângulos Virais</span>';
     }
   });
 }
@@ -1123,20 +1151,21 @@ function wireFactoryTab() {
   document.getElementById('suggestIdeasBtn').addEventListener('click', async () => {
     const btn = document.getElementById('suggestIdeasBtn');
     const box = document.getElementById('ideasSuggestionBox');
-    btn.disabled = true;
-    btn.textContent = '⏳ Gerando ideias...';
     try {
       const seriesId = document.getElementById('f_seriesSelect').value;
       const serie = state.series.find((s) => s.id === seriesId);
       const existingTitles = state.episodes.filter((e) => e.seriesId === seriesId).map((e) => e.title);
-      const res = await generateSeriesIdeas({
-        creator: getActiveCreator(),
-        modelId: document.getElementById('f_modelSelect').value,
-        seriesName: serie?.name || 'Minha Série',
-        existingTitles,
-        apiKey: state.settings.geminiKey,
-        modelName: state.settings.geminiModel
-      });
+      const res = await runWithStatusTicker(btn, 'Gerando ideias...', (onStatus) =>
+        generateSeriesIdeas({
+          creator: getActiveCreator(),
+          modelId: document.getElementById('f_modelSelect').value,
+          seriesName: serie?.name || 'Minha Série',
+          existingTitles,
+          apiKey: state.settings.geminiKey,
+          modelName: state.settings.geminiModel,
+          onStatus
+        })
+      );
 
       box.classList.remove('hidden');
       box.innerHTML = `<div class="muted-xs">Clique em uma ideia para preencher automaticamente:</div>` +
@@ -1161,9 +1190,6 @@ function wireFactoryTab() {
       });
     } catch (err) {
       showToast(err.message, 'err');
-    } finally {
-      btn.disabled = false;
-      btn.textContent = '💡 5 Ideias IA';
     }
   });
 
@@ -1271,8 +1297,6 @@ function wireFactoryTab() {
 
 async function handleGenerateEpisode() {
   const btn = document.getElementById('generateEpisodeBtn');
-  btn.disabled = true;
-  btn.textContent = '⏳ Gerando roteiro, capa, legenda e prompt IA...';
 
   try {
     let seriesId = document.getElementById('f_seriesSelect').value;
@@ -1286,7 +1310,7 @@ async function handleGenerateEpisode() {
         creatorId: getActiveCreator().id,
         name: mObj.shortName,
         modelId: mId,
-        color: getActiveCreator().brandColor || '#EC4899',
+        color: getActiveCreator().brandColor || '#8B5CF6',
         createdAt: new Date().toISOString()
       });
       renderFactorySeriesSelect();
@@ -1297,22 +1321,25 @@ async function handleGenerateEpisode() {
     const partNumber = Number(document.getElementById('f_partNumber').value) || 1;
     const modelId = document.getElementById('f_modelSelect').value;
 
-    const generated = await generateCompleteEpisode({
-      creator: getActiveCreator(),
-      modelId,
-      seriesName: serie?.name || 'Minha Série',
-      partNumber,
-      topic: document.getElementById('f_topic').value.trim(),
-      funnelStage: document.getElementById('f_funnelStage').value,
-      viralGoal: document.getElementById('f_viralGoal').value,
-      validation: {
-        problem: document.getElementById('f_qProblem').value.trim(),
-        learn: document.getElementById('f_qLearn').value.trim(),
-        lifeChange: document.getElementById('f_qLifeChange').value.trim()
-      },
-      apiKey: state.settings.geminiKey,
-      modelName: state.settings.geminiModel
-    });
+    const generated = await runWithStatusTicker(btn, 'Gerando pacote com Gemini...', (onStatus) =>
+      generateCompleteEpisode({
+        creator: getActiveCreator(),
+        modelId,
+        seriesName: serie?.name || 'Minha Série',
+        partNumber,
+        topic: document.getElementById('f_topic').value.trim(),
+        funnelStage: document.getElementById('f_funnelStage').value,
+        viralGoal: document.getElementById('f_viralGoal').value,
+        validation: {
+          problem: document.getElementById('f_qProblem').value.trim(),
+          learn: document.getElementById('f_qLearn').value.trim(),
+          lifeChange: document.getElementById('f_qLifeChange').value.trim()
+        },
+        apiKey: state.settings.geminiKey,
+        modelName: state.settings.geminiModel,
+        onStatus
+      })
+    );
 
     document.getElementById('o_title').value = generated.title || '';
     document.getElementById('o_onScreenText').value = generated.onScreenText || '';
@@ -1335,12 +1362,24 @@ async function handleGenerateEpisode() {
 
     updateScriptTimerBadge();
     await updateCoverPreview();
-    showToast(`Pacote gerado via ${generated.generatedBy}!`, 'ok');
+
+    // Activate Roteiro & Headlines output tab and scroll into view on narrow screens
+    const outPanel = document.querySelector('#tab-factory .factory-output');
+    if (outPanel) {
+      outPanel.querySelectorAll('.subtab').forEach((b) => b.classList.toggle('active', b.dataset.subtab === 'out-script'));
+      outPanel.querySelectorAll('.subtab-panel').forEach((p) => p.classList.toggle('active', p.id === 'out-script'));
+      if (window.innerWidth <= 1060) {
+        outPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }
+
+    if (generated.fallbackReason) {
+      showToast(`Google Gemini está em pico de demanda agora — pacote pronto via Motor Inteligente de Contingência!`, 'ok');
+    } else {
+      showToast(`Pacote gerado via ${generated.generatedBy}!`, 'ok');
+    }
   } catch (err) {
     showToast(`Erro ao gerar roteiro: ${err.message}`, 'err');
-  } finally {
-    btn.disabled = false;
-    btn.textContent = '⚡ Gerar Pacote Completo';
   }
 }
 
@@ -1545,17 +1584,18 @@ function wireClubAndTeleprompter() {
       return;
     }
     const btn = document.getElementById('runClubAnalysisBtn');
-    btn.disabled = true;
-    btn.textContent = '⏳ Analisando com olhar do Clube...';
 
     try {
-      const res = await analyzeScript({
-        script,
-        creator: getActiveCreator(),
-        modelId: document.getElementById('f_modelSelect').value,
-        apiKey: state.settings.geminiKey,
-        modelName: state.settings.geminiModel
-      });
+      const res = await runWithStatusTicker(btn, 'Analisando no Clube...', (onStatus) =>
+        analyzeScript({
+          script,
+          creator: getActiveCreator(),
+          modelId: document.getElementById('f_modelSelect').value,
+          apiKey: state.settings.geminiKey,
+          modelName: state.settings.geminiModel,
+          onStatus
+        })
+      );
 
       document.getElementById('clubResultBox').classList.remove('hidden');
       document.getElementById('clubScoreValue').textContent = `${res.score}%`;
@@ -1569,9 +1609,6 @@ function wireClubAndTeleprompter() {
       lastAnalysisImprovedScript = res.improvedScript || script;
     } catch (err) {
       showToast(err.message, 'err');
-    } finally {
-      btn.disabled = false;
-      btn.textContent = '🔎 Analisar Roteiro Agora';
     }
   });
 
