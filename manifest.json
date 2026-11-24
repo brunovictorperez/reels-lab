@@ -4,15 +4,33 @@
   "description": "Crie séries de Reels completos, headlines virais, capas 9:16, legendas e prompts de edição com IA.",
   "start_url": "./index.html",
   "display": "standalone",
-  "background_color": "#0B0B14",
-  "theme_color": "#0B0B14",
+  "background_color": "#F5F5F7",
+  "theme_color": "#F5F5F7",
   "orientation": "any",
   "icons": [
+    {
+      "src": "./icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
     {
       "src": "./icon.svg",
       "sizes": "any",
       "type": "image/svg+xml",
-      "purpose": "any maskable"
+      "purpose": "any"
     }
   ]
 }

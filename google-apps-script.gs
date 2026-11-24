@@ -75,6 +75,77 @@ function doPost(e) {
       });
     }
 
+    if (action === 'fetch_trends') {
+      var q = String(payload.query || '').trim();
+      var niche = String(payload.niche || '').trim();
+      var baseTopic = q || niche || 'tendencias brasil';
+
+      var feeds = [
+        {
+          label: 'Google News Brasil',
+          url: 'https://news.google.com/rss/search?q=' + encodeURIComponent(baseTopic + ' when:7d') + '&hl=pt-BR&gl=BR&ceid=BR:pt-419'
+        },
+        {
+          label: 'Google Trends Brasil',
+          url: 'https://trends.google.com/trending/rss?geo=BR'
+        },
+        {
+          label: 'X / Viral Brasil',
+          url: 'https://news.google.com/rss/search?q=' + encodeURIComponent('(' + baseTopic + ') (viral OR polemica OR twitter OR X OR reels OR tiktok) when:5d') + '&hl=pt-BR&gl=BR&ceid=BR:pt-419'
+        }
+      ];
+
+      var collected = [];
+      var seenUrls = {};
+
+      feeds.forEach(function (feed) {
+        try {
+          var res = UrlFetchApp.fetch(feed.url, {
+            muteHttpExceptions: true,
+            followRedirects: true,
+            headers: { 'User-Agent': 'Mozilla/5.0' }
+          });
+          if (res.getResponseCode() < 200 || res.getResponseCode() >= 300) return;
+
+          var xml = res.getContentText('UTF-8');
+          var doc = XmlService.parse(xml);
+          var channel = doc.getRootElement().getChild('channel');
+          if (!channel) return;
+
+          var items = channel.getChildren('item');
+          for (var i = 0; i < Math.min(items.length, 6); i++) {
+            var item = items[i];
+            var title = item.getChildText('title') || '';
+            var link = item.getChildText('link') || '';
+            var pubDate = item.getChildText('pubDate') || '';
+            var desc = (item.getChildText('description') || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+            var srcEl = item.getChild('source');
+            var sourceName = (srcEl && srcEl.getText()) ? srcEl.getText() : feed.label;
+
+            if (!title || seenUrls[link || title]) continue;
+            seenUrls[link || title] = true;
+
+            collected.push({
+              title: title.trim(),
+              link: link.trim(),
+              pubDate: pubDate.trim(),
+              sourceName: sourceName.trim(),
+              summary: desc.slice(0, 240),
+              channel: feed.label
+            });
+          }
+        } catch (feedErr) {
+          // Ignora falha pontual de um feed para manter os demais ativos
+        }
+      });
+
+      return jsonResponse_({
+        ok: true,
+        items: collected,
+        fetchedAt: new Date().toISOString()
+      });
+    }
+
     if (action === 'sync' && payload.state) {
       var state = payload.state;
 

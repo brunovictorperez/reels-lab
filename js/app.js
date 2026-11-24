@@ -908,12 +908,14 @@ function wireRadarTab() {
     const query = document.getElementById('radarQueryInput').value.trim();
 
     try {
-      const result = await runWithStatusTicker(btn, 'Pesquisando tendências & conectando ao nicho...', (onStatus) =>
+      const activeCreator = getActiveCreator();
+      const result = await runWithStatusTicker(btn, 'Coletando notícias reais & conectando ao nicho...', (onStatus) =>
         searchHotTopics({
-          creator: getActiveCreator(),
+          creator: activeCreator,
           focusQuery: query,
           apiKey: state.settings.geminiKey,
           modelName: state.settings.geminiModel,
+          driveWebhookUrl: getEffectiveDriveWebhook(state, activeCreator),
           onStatus
         })
       );
@@ -950,12 +952,20 @@ function renderCachedHotTopics() {
   banner.classList.remove('hidden');
   banner.innerHTML = `📡 <strong>Fonte:</strong> ${escapeHtml(cached.generatedBy || 'IA')} — Clique em <em>"Criar na Fábrica"</em> em qualquer ângulo abaixo para gerar roteiro, capa e legenda prontos.`;
 
-  container.innerHTML = cached.topics.map((topic, tIdx) => `
+  container.innerHTML = cached.topics.map((topic, tIdx) => {
+    const hasMeta = Boolean(topic.sourceName || topic.publishedAt || topic.sourceUrl);
+    const metaHtml = hasMeta ? `
+      <div class="trend-source-row">
+        <span>📰 ${escapeHtml(topic.sourceName || 'Internet')}${topic.publishedAt ? ` • ${escapeHtml(topic.publishedAt)}` : ''}</span>
+        ${topic.sourceUrl ? `<a class="trend-source-link" href="${escapeHtml(topic.sourceUrl)}" target="_blank" rel="noopener">Ler fonte ↗</a>` : ''}
+      </div>` : '';
+    return `
     <div class="card trend-card">
       <div>
         <span class="badge-pill">TIMING QUENTE #${tIdx + 1}</span>
         <h3 class="mt-8">${escapeHtml(topic.trendTitle)}</h3>
         <p class="muted-sm mt-6">${escapeHtml(topic.timingWhy)}</p>
+        ${metaHtml}
         <div class="rule-hint mt-8">🎯 <strong>Ponte para sua bolha:</strong> ${escapeHtml(topic.bubbleBridge)}</div>
       </div>
       <div>
@@ -978,7 +988,8 @@ function renderCachedHotTopics() {
         }).join('')}
       </div>
     </div>
-  `).join('');
+  `;
+  }).join('');
 
   container.querySelectorAll('.use-trend-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -995,7 +1006,7 @@ function renderCachedHotTopics() {
 
   if (cached.sources && cached.sources.length) {
     sourcesBox.classList.remove('hidden');
-    sourcesBox.innerHTML = `<strong>🔗 Fontes consultadas no Google:</strong> ` +
+    sourcesBox.innerHTML = `<strong>🔗 Fontes reais consultadas na Internet:</strong> ` +
       cached.sources.slice(0, 6).map((s) => `<a href="${escapeHtml(s.uri)}" target="_blank" rel="noopener">${escapeHtml(s.title || s.uri)}</a>`).join(' • ');
   } else {
     sourcesBox.classList.add('hidden');

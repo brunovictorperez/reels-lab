@@ -23,8 +23,8 @@
   --soft-accent: #5e5ce6;
   --soft-accent-bg: rgba(94, 92, 230, 0.09);
   --soft-accent-border: rgba(94, 92, 230, 0.24);
-  --soft-gradient: linear-gradient(135deg, #5e5ce6 0%, #8b5cf6 52%, #ec4899 100%);
-  --soft-tint: linear-gradient(135deg, rgba(94, 92, 230, 0.07), rgba(236, 72, 153, 0.06), rgba(56, 189, 248, 0.06));
+  --soft-gradient: linear-gradient(135deg, #5e5ce6 0%, #766ef2 52%, #978efa 100%);
+  --soft-tint: linear-gradient(135deg, rgba(94, 92, 230, 0.07), rgba(139, 92, 246, 0.06), rgba(56, 189, 248, 0.05));
 
   --green: #16a34a;
   --amber: #d97706;
@@ -33,7 +33,7 @@
 
   --orb-1: rgba(167, 139, 250, 0.24);
   --orb-2: rgba(125, 211, 252, 0.22);
-  --orb-3: rgba(249, 168, 212, 0.2);
+  --orb-3: rgba(196, 181, 253, 0.2);
 
   --shadow-sm: 0 2px 10px rgba(0, 0, 0, 0.04);
   --shadow: 0 10px 34px rgba(0, 0, 0, 0.06);
@@ -63,8 +63,8 @@
   --soft-accent: #a78bfa;
   --soft-accent-bg: rgba(167, 139, 250, 0.14);
   --soft-accent-border: rgba(167, 139, 250, 0.3);
-  --soft-gradient: linear-gradient(135deg, #7c3aed 0%, #a855f7 52%, #ec4899 100%);
-  --soft-tint: linear-gradient(135deg, rgba(167, 139, 250, 0.11), rgba(56, 189, 248, 0.07), rgba(236, 72, 153, 0.07));
+  --soft-gradient: linear-gradient(135deg, #7c3aed 0%, #8e63f6 52%, #a88bfa 100%);
+  --soft-tint: linear-gradient(135deg, rgba(124, 58, 237, 0.11), rgba(167, 139, 250, 0.08), rgba(56, 189, 248, 0.06));
 
   --green: #34d399;
   --amber: #fbbf24;
@@ -73,7 +73,7 @@
 
   --orb-1: rgba(139, 92, 246, 0.18);
   --orb-2: rgba(56, 189, 248, 0.14);
-  --orb-3: rgba(236, 72, 153, 0.13);
+  --orb-3: rgba(167, 139, 250, 0.14);
 
   --shadow-sm: 0 4px 14px rgba(0, 0, 0, 0.3);
   --shadow: 0 14px 40px rgba(0, 0, 0, 0.52);
@@ -198,16 +198,23 @@ a {
 }
 
 .brand-logo {
-  width: 36px;
-  height: 36px;
+  width: 38px;
+  height: 38px;
   border-radius: 10px;
-  background: var(--btn-primary-bg);
-  color: var(--btn-primary-text);
+  background: #fdfffe;
+  border: 1px solid var(--border);
   display: grid;
   place-items: center;
-  font-size: 13px;
-  font-weight: 700;
+  overflow: hidden;
   box-shadow: var(--shadow-sm);
+  flex-shrink: 0;
+}
+
+.brand-logo-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
 }
 
 .brand-name {
@@ -1151,6 +1158,31 @@ textarea.input {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   font-size: 0.82rem;
+}
+
+.trend-source-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 7px 10px;
+  border-radius: 10px;
+  background: var(--glass-sub);
+  border: 1px solid var(--border);
+  font-size: 0.74rem;
+  color: var(--text-muted);
+}
+
+.trend-source-link {
+  font-weight: 600;
+  color: var(--soft-accent);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.trend-source-link:hover {
+  text-decoration: underline;
 }
 
 /* CLUBE & TELEPROMPTER */

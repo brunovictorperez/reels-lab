@@ -236,6 +236,9 @@ async function callGemini({ apiKey, modelName = 'auto-gemini-4', taskType = 'cre
         if (isInvalidKeyError(res.status, msg)) {
           throw Object.assign(new Error(msg), { fatal: true });
         }
+        if (useSearch && (res.status === 400 || res.status === 403 || res.status === 429 || /search|grounding|billing|tier|tool|permission|not available|free|unsupported/i.test(msg))) {
+          throw Object.assign(new Error(msg), { searchUnsupported: true });
+        }
 
         const errObj = Object.assign(new Error(msg), {
           transient: res.status === 503 || res.status === 429 || res.status >= 500 ||
@@ -266,7 +269,7 @@ async function callGemini({ apiKey, modelName = 'auto-gemini-4', taskType = 'cre
 
       return { text, modelUsed: model, sources };
     } catch (err) {
-      if (err?.fatal) throw err;
+      if (err?.fatal || err?.searchUnsupported) throw err;
       lastError = Object.assign(err, { transient: true });
 
       if (!didDiscover) {
@@ -540,23 +543,313 @@ function buildOfflineHotTopics(creator, generatedBy = 'Modo Demonstração (Conf
   };
 }
 
-export async function searchHotTopics({ creator, focusQuery = '', apiKey, modelName, onStatus = null }) {
+function decodeXmlEntities(str = '') {
+  return String(str)
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(parseInt(dec, 10)))
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export function formatTrendDate(rawDate = '') {
+  if (!rawDate) return 'Recente';
+  const dt = new Date(rawDate);
+  if (Number.isNaN(dt.getTime())) return String(rawDate).slice(0, 22);
+  return dt.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+
+export function parseRssXmlItems(xmlText, defaultSource = 'Google News', limit = 6) {
+  const xml = String(xmlText || '');
+  if (!xml.trim()) return [];
+  const items = [];
+
+  if (typeof DOMParser !== 'undefined') {
+    try {
+      const doc = new DOMParser().parseFromString(xml, 'text/xml');
+      const nodes = Array.from(doc.querySelectorAll('item')).slice(0, limit);
+      for (const node of nodes) {
+        const rawTitle = node.querySelector('title')?.textContent?.trim() || '';
+        const link = node.querySelector('link')?.textContent?.trim() || '';
+        const pubDate = node.querySelector('pubDate')?.textContent?.trim() || '';
+        const sourceTag = node.querySelector('source')?.textContent?.trim() || '';
+        const desc = decodeXmlEntities(node.querySelector('description')?.textContent || '');
+        const cleanTitle = rawTitle.replace(/\s+-\s+[^-]+$/, '').trim() || rawTitle;
+        const sourceName = sourceTag || (rawTitle.match(/\s+-\s+([^-]+)$/)?.[1]?.trim()) || defaultSource;
+        if (cleanTitle) {
+          items.push({
+            title: decodeXmlEntities(cleanTitle),
+            link,
+            pubDate,
+            sourceName: decodeXmlEntities(sourceName),
+            summary: desc.slice(0, 240),
+            channel: defaultSource
+          });
+        }
+      }
+      if (items.length) return items;
+    } catch {
+      // Fallback para regex caso o parser XML não esteja disponível
+    }
+  }
+
+  const itemRegex = /<item\b[^>]*>([\s\S]*?)<\/item>/gi;
+  let match;
+  while ((match = itemRegex.exec(xml)) !== null && items.length < limit) {
+    const block = match[1];
+    const readTag = (tag) => {
+      const m = block.match(new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tag}>`, 'i'));
+      return m ? decodeXmlEntities(m[1]) : '';
+    };
+    const rawTitle = readTag('title');
+    const link = readTag('link');
+    const pubDate = readTag('pubDate');
+    const sourceTag = readTag('source');
+    const desc = readTag('description');
+    const cleanTitle = rawTitle.replace(/\s+-\s+[^-]+$/, '').trim() || rawTitle;
+    const sourceName = sourceTag || (rawTitle.match(/\s+-\s+([^-]+)$/)?.[1]?.trim()) || defaultSource;
+    if (cleanTitle) {
+      items.push({
+        title: cleanTitle,
+        link,
+        pubDate,
+        sourceName,
+        summary: desc.slice(0, 240),
+        channel: defaultSource
+      });
+    }
+  }
+  return items;
+}
+
+async function fetchSingleRssFeed(feed) {
+  try {
+    const rss2jsonUrl = `https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(feed.url)}`;
+    const res = await fetchWithTimeout(rss2jsonUrl, { method: 'GET' }, 10000);
+    if (res.ok) {
+      const data = await res.json();
+      if (data?.status === 'ok' && Array.isArray(data.items) && data.items.length) {
+        return data.items.slice(0, 6).map((item) => {
+          const rawTitle = String(item.title || '').trim();
+          const cleanTitle = rawTitle.replace(/\s+-\s+[^-]+$/, '').trim() || rawTitle;
+          const inferredSrc = rawTitle.match(/\s+-\s+([^-]+)$/)?.[1]?.trim();
+          return {
+            title: decodeXmlEntities(cleanTitle),
+            link: String(item.link || '').trim(),
+            pubDate: String(item.pubDate || '').trim(),
+            sourceName: decodeXmlEntities(item.author || inferredSrc || feed.label),
+            summary: decodeXmlEntities(item.description || '').slice(0, 240),
+            channel: feed.label
+          };
+        }).filter((it) => it.title);
+      }
+    }
+  } catch {
+    // Tenta proxy XML direto abaixo
+  }
+
+  try {
+    const allOriginsUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(feed.url)}`;
+    const res = await fetchWithTimeout(allOriginsUrl, { method: 'GET' }, 10000);
+    if (res.ok) {
+      const xml = await res.text();
+      return parseRssXmlItems(xml, feed.label, 6);
+    }
+  } catch {
+    // Sem acesso via proxy
+  }
+
+  return [];
+}
+
+function dedupeTrendItems(rawItems = []) {
+  const seen = new Map();
+  for (const item of rawItems) {
+    const key = String(item.link || item.title || '').toLowerCase().trim();
+    if (!key || !item.title || seen.has(key)) continue;
+    seen.set(key, item);
+  }
+  return Array.from(seen.values()).slice(0, 15);
+}
+
+export async function fetchLiveInternetTrends({ focusQuery = '', niche = '', driveWebhookUrl = '', onStatus = null } = {}) {
+  const cleanNiche = String(niche || '').replace(/[\/|,;]+/g, ' ').trim().split(/\s+/).slice(0, 5).join(' ');
+  const baseTopic = String(focusQuery || '').trim() || cleanNiche || 'tendencias redes sociais brasil';
+
+  if (driveWebhookUrl) {
+    if (typeof onStatus === 'function') onStatus('Buscando notícias reais via Radar Drive...');
+    try {
+      const res = await fetchWithTimeout(driveWebhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ action: 'fetch_trends', query: focusQuery, niche: cleanNiche })
+      }, 12000);
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.ok && Array.isArray(data.items) && data.items.length) {
+          const items = dedupeTrendItems(data.items);
+          const channelsUsed = [...new Set(items.map((it) => it.channel || 'Google News'))];
+          return { items, channelsUsed };
+        }
+      }
+    } catch {
+      // Apps Script desatualizado ou indisponível: cai automaticamente nos feeds públicos no navegador
+    }
+  }
+
+  if (typeof onStatus === 'function') onStatus('Coletando notícias reais, Google Trends e X (BR)...');
+
+  const feeds = [
+    {
+      label: 'Google News Brasil',
+      url: `https://news.google.com/rss/search?q=${encodeURIComponent(`${baseTopic} when:7d`)}&hl=pt-BR&gl=BR&ceid=BR:pt-419`
+    },
+    {
+      label: 'Google Trends BR',
+      url: 'https://trends.google.com/trending/rss?geo=BR'
+    },
+    {
+      label: 'X / Viral Brasil',
+      url: `https://news.google.com/rss/search?q=${encodeURIComponent(`(${baseTopic}) (viral OR twitter OR X OR polemica OR reels OR tiktok) when:5d`)}&hl=pt-BR&gl=BR&ceid=BR:pt-419`
+    }
+  ];
+
+  const results = await Promise.allSettled(feeds.map((feed) => fetchSingleRssFeed(feed)));
+  const collected = [];
+  const channelsUsed = [];
+
+  results.forEach((res, idx) => {
+    if (res.status === 'fulfilled' && Array.isArray(res.value) && res.value.length) {
+      collected.push(...res.value);
+      channelsUsed.push(feeds[idx].label);
+    }
+  });
+
+  return {
+    items: dedupeTrendItems(collected),
+    channelsUsed: channelsUsed.length ? channelsUsed : ['Internet RSS']
+  };
+}
+
+export async function searchHotTopics({ creator, focusQuery = '', apiKey, modelName, driveWebhookUrl = '', onStatus = null }) {
   const today = new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' });
 
   if (!apiKey) {
     return buildOfflineHotTopics(creator);
   }
 
-  const prompt = `Hoje é ${today}.
-Use a Pesquisa Google (se disponível) para encontrar 4 notícias ATUAIS, assuntos quentes em alta no Brasil ou tendências virais de redes sociais desta semana que possam ser recicladas pelo método "O Timing" do Código Viral ("Ataque outras bolhas sem sair da sua").
+  const liveFeed = await fetchLiveInternetTrends({
+    focusQuery,
+    niche: creator?.niche || '',
+    driveWebhookUrl,
+    onStatus
+  });
+
+  if (liveFeed.items.length > 0) {
+    const formattedFeed = liveFeed.items.map((item, idx) =>
+      `[${idx + 1}] ${item.title} | Fonte: ${item.sourceName || item.channel} | Data: ${formatTrendDate(item.pubDate)} | Canal: ${item.channel}${item.summary ? ` | Resumo: ${item.summary}` : ''}`
+    ).join('\n');
+
+    const groundedPrompt = `Hoje é ${today}.
+Abaixo estão ${liveFeed.items.length} NOTÍCIAS E TRENDS REAIS COLETADAS DA INTERNET AGORA (Google News Brasil, Google Trends BR e repercussões do X/redes sociais):
+
+${formattedFeed}
+
+${focusQuery ? `Foco pedido pelo criador: "${focusQuery}".` : ''}
+
+CONTEXTO DO CRIADOR:
+${buildCreatorContext(creator)}
+
+REGRAS ESTRITAS:
+1. Baseie-se 100% NOS ASSUNTOS REAIS NUMERADOS ACIMA ([1] a [${liveFeed.items.length}]). É PROIBIDO inventar notícias, eventos ou dados que não estejam na lista acima.
+2. Escolha os 4 assuntos reais mais fortes para reciclar pelo método "O Timing" do Código Viral ("Ataque outras bolhas sem sair da sua"), preferindo notícias recentes e virais com boa ponte para o nicho do criador.
+3. Em cada um dos 4 itens, informe exatamente o "sourceIndex" correspondente (número de 1 a ${liveFeed.items.length}).
+4. Para cada assunto escolhido, crie 3 ângulos de Reels conectados ao nicho do criador (Topo=Descoberta <30s, Meio=Conexão 30-45s, Fundo=Venda 45-60s), usando: serie_01, serie_02, serie_03, serie_04, serie_05 ou codigo_viral.
+
+Responda APENAS com um JSON válido no formato:
+{
+  "topics": [
+    {
+      "sourceIndex": 1,
+      "trendTitle": "Título fiel à notícia/trend real [sourceIndex]",
+      "timingWhy": "Por que está em alta agora segundo a matéria/trend (1-2 frases)",
+      "bubbleBridge": "Como conectar esse assunto real com o nicho do criador sem virar página de fofoca",
+      "angles": [
+        { "funnel": "topo", "modelId": "codigo_viral", "title": "Ideia de título/gancho para Descoberta (<30s)" },
+        { "funnel": "meio", "modelId": "serie_03", "title": "Ideia de episódio para Conexão (30-45s)" },
+        { "funnel": "fundo", "modelId": "serie_05", "title": "Ideia de episódio para Venda / Quebra de objeção" }
+      ]
+    }
+  ]
+}`;
+
+    const { text, modelUsed } = await callGemini({
+      apiKey,
+      modelName,
+      taskType: 'radar',
+      prompt: groundedPrompt,
+      useSearch: false,
+      expectJson: true,
+      onStatus
+    });
+
+    const parsed = cleanJsonResponse(text);
+    const groundedTopics = (parsed.topics || []).map((t, idx) => {
+      const refIdx = Number(t.sourceIndex);
+      const matched = (refIdx >= 1 && refIdx <= liveFeed.items.length)
+        ? liveFeed.items[refIdx - 1]
+        : (liveFeed.items[idx] || liveFeed.items[0]);
+      return {
+        ...t,
+        sourceName: matched?.sourceName || matched?.channel || 'Internet',
+        publishedAt: formatTrendDate(matched?.pubDate),
+        sourceUrl: matched?.link || ''
+      };
+    });
+
+    const sources = [];
+    const seenUri = new Set();
+    groundedTopics.forEach((t) => {
+      if (t.sourceUrl && !seenUri.has(t.sourceUrl)) {
+        seenUri.add(t.sourceUrl);
+        sources.push({
+          title: `${t.trendTitle} (${t.sourceName})`,
+          uri: t.sourceUrl
+        });
+      }
+    });
+    liveFeed.items.forEach((it) => {
+      if (it.link && !seenUri.has(it.link) && sources.length < 8) {
+        seenUri.add(it.link);
+        sources.push({
+          title: `${it.title} (${it.sourceName})`,
+          uri: it.link
+        });
+      }
+    });
+
+    return {
+      topics: groundedTopics,
+      sources,
+      generatedBy: `Internet ao Vivo (${liveFeed.channelsUsed.join(' + ')}) + IA (${modelUsed})`
+    };
+  }
+
+  // Fallback exclusivo para chaves pagas com Google Search Grounding nativo caso os feeds RSS estejam bloqueados
+  const searchPrompt = `Hoje é ${today}.
+Use a Pesquisa Google para encontrar 4 notícias ATUAIS reais desta semana no Brasil (portais de notícias, Google Trends ou assuntos em alta no X/Twitter) que possam ser recicladas pelo método "O Timing" do Código Viral ("Ataque outras bolhas sem sair da sua").
 ${focusQuery ? `Foco adicional pedido pelo criador: "${focusQuery}".` : ''}
 
 CONTEXTO DO CRIADOR:
 ${buildCreatorContext(creator)}
 
-Para cada uma das 4 notícias/tendências, gere 3 ângulos de Reels conectados ao nicho do criador (Topo=Descoberta <30s, Meio=Conexão 30-45s, Fundo=Venda 45-60s), escolhendo o melhor modelo entre: serie_01, serie_02, serie_03, serie_04, serie_05, codigo_viral.
-
-Responda APENAS com um JSON válido no formato:
+Retorne APENAS JSON válido no formato:
 {
   "topics": [
     {
@@ -577,37 +870,28 @@ Responda APENAS com um JSON válido no formato:
       apiKey,
       modelName,
       taskType: 'radar',
-      prompt,
+      prompt: searchPrompt,
       useSearch: true,
       expectJson: false,
       onStatus
     });
+    if (!sources || !sources.length) {
+      throw new Error('A pesquisa não retornou fontes reais verificáveis da Internet.');
+    }
     const parsed = cleanJsonResponse(text);
-    return { ...parsed, sources, generatedBy: `Google Search + IA (${modelUsed})` };
+    const enrichedTopics = (parsed.topics || []).map((t, idx) => {
+      const s = sources[idx] || sources[0];
+      return {
+        ...t,
+        sourceName: s?.title || 'Google Search',
+        publishedAt: 'Agora',
+        sourceUrl: s?.uri || ''
+      };
+    });
+    return { topics: enrichedTopics, sources, generatedBy: `Google Search ao Vivo + IA (${modelUsed})` };
   } catch (err) {
     if (err?.fatal) throw err;
-    try {
-      // Fallback without googleSearch tool in case the user's tier/model restricts search grounding
-      const { text, modelUsed } = await callGemini({
-        apiKey,
-        modelName,
-        taskType: 'radar',
-        prompt,
-        useSearch: false,
-        expectJson: true,
-        onStatus
-      });
-      const parsed = cleanJsonResponse(text);
-      return { ...parsed, sources: [], generatedBy: `IA (${modelUsed})` };
-    } catch (innerErr) {
-      if (!innerErr?.fatal && isTransientServiceError(innerErr)) {
-        return {
-          ...buildOfflineHotTopics(creator, 'Radar de Contingência (Pico de demanda no Gemini — tente novamente mais tarde)'),
-          fallbackReason: innerErr.message
-        };
-      }
-      throw innerErr;
-    }
+    throw new Error('Não foi possível carregar notícias reais da Internet agora (feeds RSS bloqueados nesta rede e Google Search Grounding indisponível na chave gratuita). Tente novamente em instantes ou atualize o Google Apps Script.');
   }
 }
 
