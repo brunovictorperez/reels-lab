@@ -78,29 +78,34 @@ function doPost(e) {
     if (action === 'fetch_trends') {
       var q = String(payload.query || '').trim();
       var niche = String(payload.niche || '').trim();
-      var baseTopic = q || niche || 'tendencias brasil';
+      var rawQueries = Array.isArray(payload.queries) ? payload.queries : [];
+      var searchTerms = [];
 
-      var feeds = [
-        {
-          label: 'Google News Brasil',
-          url: 'https://news.google.com/rss/search?q=' + encodeURIComponent(baseTopic + ' when:7d') + '&hl=pt-BR&gl=BR&ceid=BR:pt-419'
-        },
-        {
-          label: 'Google Trends Brasil',
-          url: 'https://trends.google.com/trending/rss?geo=BR'
-        },
-        {
-          label: 'X / Viral Brasil',
-          url: 'https://news.google.com/rss/search?q=' + encodeURIComponent('(' + baseTopic + ') (viral OR polemica OR twitter OR X OR reels OR tiktok) when:5d') + '&hl=pt-BR&gl=BR&ceid=BR:pt-419'
+      rawQueries.forEach(function (term) {
+        var clean = String(term || '').replace(/[()]/g, ' ').replace(/\s+/g, ' ').trim();
+        if (clean && searchTerms.length < 3) {
+          searchTerms.push(clean);
         }
-      ];
+      });
+
+      if (!searchTerms.length) {
+        var fallbackBase = q || niche || 'economia comportamento brasil';
+        fallbackBase.split(/[\/|,;•–—-]+/).forEach(function (part) {
+          var words = part.trim().split(/\s+/).slice(0, 3).join(' ');
+          if (words && searchTerms.length < 3) searchTerms.push(words);
+        });
+      }
+
+      if (!searchTerms.length) searchTerms.push('brasil comportamento');
 
       var collected = [];
       var seenUrls = {};
 
-      feeds.forEach(function (feed) {
+      searchTerms.forEach(function (term) {
+        var label = 'Google News (' + term + ')';
+        var feedUrl = 'https://news.google.com/rss/search?q=' + encodeURIComponent(term) + '&hl=pt-BR&gl=BR&ceid=BR:pt-419';
         try {
-          var res = UrlFetchApp.fetch(feed.url, {
+          var res = UrlFetchApp.fetch(feedUrl, {
             muteHttpExceptions: true,
             followRedirects: true,
             headers: { 'User-Agent': 'Mozilla/5.0' }
@@ -113,14 +118,14 @@ function doPost(e) {
           if (!channel) return;
 
           var items = channel.getChildren('item');
-          for (var i = 0; i < Math.min(items.length, 6); i++) {
+          for (var i = 0; i < Math.min(items.length, 5); i++) {
             var item = items[i];
             var title = item.getChildText('title') || '';
             var link = item.getChildText('link') || '';
             var pubDate = item.getChildText('pubDate') || '';
             var desc = (item.getChildText('description') || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
             var srcEl = item.getChild('source');
-            var sourceName = (srcEl && srcEl.getText()) ? srcEl.getText() : feed.label;
+            var sourceName = (srcEl && srcEl.getText()) ? srcEl.getText() : label;
 
             if (!title || seenUrls[link || title]) continue;
             seenUrls[link || title] = true;
@@ -131,7 +136,7 @@ function doPost(e) {
               pubDate: pubDate.trim(),
               sourceName: sourceName.trim(),
               summary: desc.slice(0, 240),
-              channel: feed.label
+              channel: label
             });
           }
         } catch (feedErr) {
