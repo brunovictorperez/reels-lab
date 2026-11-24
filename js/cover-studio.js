@@ -382,8 +382,8 @@ export async function renderCoverCanvas(canvas, options = {}) {
   ctx.font = 'italic 400 28px "Instrument Serif", Georgia, serif';
   ctx.fillText('assista até o final', WIDTH / 2, footerY + 50);
 
-  // 5. Optional Safe Zone Guide Overlay (hidden on PNG export)
-  if (showSafeZone) {
+  // 5. Optional Safe Zone Guide Overlay (STRICTLY hidden on PNG export / saved covers)
+  if (Boolean(showSafeZone)) {
     ctx.save();
     ctx.strokeStyle = 'rgba(56, 189, 248, 0.85)';
     ctx.setLineDash([16, 12]);
@@ -398,6 +398,79 @@ export async function renderCoverCanvas(canvas, options = {}) {
   }
 
   return canvas.toDataURL('image/png');
+}
+
+function dataUrlToBlob(dataUrl) {
+  const parts = String(dataUrl || '').split(',');
+  const mime = (parts[0].match(/:(.*?);/) || [])[1] || 'image/png';
+  const bin = atob(parts[1] || '');
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) {
+    bytes[i] = bin.charCodeAt(i);
+  }
+  return new Blob([bytes], { type: mime });
+}
+
+export async function renderCleanCoverExport(options = {}) {
+  const offscreen = document.createElement('canvas');
+  const dataUrl = await renderCoverCanvas(offscreen, { ...options, showSafeZone: false });
+  let blob = await new Promise((resolve) => {
+    if (typeof offscreen.toBlob === 'function') {
+      offscreen.toBlob((b) => resolve(b), 'image/png');
+    } else {
+      resolve(null);
+    }
+  });
+  if (!blob) {
+    blob = dataUrlToBlob(dataUrl);
+  }
+  return { dataUrl, blob };
+}
+
+export async function saveCoverImage({ blob, dataUrl, filename = 'capa-reels-lab.png' }) {
+  const finalBlob = blob || dataUrlToBlob(dataUrl);
+  const canUseShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function' && typeof File !== 'undefined';
+
+  if (canUseShare) {
+    try {
+      const file = new File([finalBlob], filename, { type: 'image/png' });
+      const canShareFiles = typeof navigator.canShare === 'function' ? navigator.canShare({ files: [file] }) : false;
+      if (canShareFiles) {
+        await navigator.share({
+          files: [file],
+          title: 'Capa Reels Lab'
+        });
+        return { method: 'share', dataUrl };
+      }
+    } catch (err) {
+      if (err?.name === 'AbortError') {
+        return { method: 'cancelled', dataUrl };
+      }
+    }
+  }
+
+  const isMobile = typeof navigator !== 'undefined' && /iPhone|iPad|iPod|Android/i.test(navigator.userAgent || '');
+  if (isMobile) {
+    return { method: 'fallback_modal', dataUrl, blob: finalBlob, filename };
+  }
+
+  triggerBlobDownload(finalBlob, dataUrl, filename);
+  return { method: 'download', dataUrl };
+}
+
+export function triggerBlobDownload(blob, dataUrl, filename = 'capa-reels-lab.png') {
+  if (blob && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+    return;
+  }
+  downloadDataUrl(dataUrl, filename);
 }
 
 export function downloadDataUrl(dataUrl, filename = 'capa-reels-lab.png') {

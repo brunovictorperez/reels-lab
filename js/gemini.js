@@ -40,8 +40,8 @@ function cleanJsonResponse(text) {
   return JSON.parse(cleaned.slice(start, end + 1));
 }
 
-const REQUEST_TIMEOUT_MS = 20000;
-let discoveredModelsCache = { key: '', models: [] };
+const REQUEST_TIMEOUT_MS = 35000;
+let discoveredModelsCache = { key: '', models: [], categorized: null };
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
   const controller = new AbortController();
@@ -69,54 +69,129 @@ function isTransientServiceError(err) {
     /high demand|overloaded|unavailable|try again|temporarily|quota|rate limit|resource_exhausted|tempo limite|timeout|aborted|failed to fetch|network|503|429|500|502|504/i.test(msg);
 }
 
-async function discoverActiveGeminiModels(apiKey) {
+export function getOrchestratorQueue(modelName = 'auto-gemini-4', taskType = 'creative') {
+  const preferred = String(modelName || '').trim();
+  const isLegacy = !preferred || /^(?:gemini-2\.|gemini-3\.8-flash-lite|gemini-3\.8-pro|gemini-flash-lite-latest)/i.test(preferred);
+
+  if (isLegacy || preferred === 'auto-gemini-4') {
+    return [
+      'gemini-4-hydrogen',
+      'gemini-4-neon',
+      'gemini-4-argon',
+      'gemini-3.8-flash',
+      'gemini-3.6-flash',
+      'gemini-3.5-flash-lite'
+    ];
+  }
+
+  if (preferred === 'auto-gemini-4-pro') {
+    if (taskType === 'fast' || taskType === 'radar') {
+      return [
+        'gemini-4-neon',
+        'gemini-4-hydrogen',
+        'gemini-4-argon',
+        'gemini-3.8-flash',
+        'gemini-3.5-flash-lite'
+      ];
+    }
+    return [
+      'gemini-4-neon',
+      'gemini-4-argon',
+      'gemini-4-carbon',
+      'gemini-4-hydrogen',
+      'gemini-3.8-flash',
+      'gemini-3.5-flash-lite'
+    ];
+  }
+
+  return [
+    preferred,
+    'gemini-4-hydrogen',
+    'gemini-4-neon',
+    'gemini-4-argon',
+    'gemini-3.8-flash',
+    'gemini-3.6-flash',
+    'gemini-3.5-flash-lite'
+  ].filter((v, i, a) => v && a.indexOf(v) === i);
+}
+
+function scoreDiscoveredModel(name) {
+  const n = String(name || '').toLowerCase();
+  if (n === 'gemini-4-hydrogen') return 0;
+  if (n === 'gemini-4-neon') return 1;
+  if (n === 'gemini-4-argon') return 2;
+  if (n === 'gemini-4-carbon') return 3;
+  if (/^gemini-4/.test(n)) return 4;
+  if (n === 'gemini-3.8-flash') return 10;
+  if (n === 'gemini-3.6-flash') return 11;
+  if (n === 'gemini-3.5-flash-lite') return 12;
+  if (n === 'gemini-3.1-flash-lite') return 13;
+  if (/^gemini-3/.test(n)) return 15;
+  if (/-latest$/i.test(n)) return 50;
+  return 25;
+}
+
+async function discoverActiveGeminiModels(apiKey, forceRefresh = false) {
   if (!apiKey) return [];
-  if (discoveredModelsCache.key === apiKey && discoveredModelsCache.models.length) {
+  if (!forceRefresh && discoveredModelsCache.key === apiKey && discoveredModelsCache.models.length) {
     return discoveredModelsCache.models;
   }
   try {
-    const res = await fetchWithTimeout(`${BASE_URL}?key=${encodeURIComponent(apiKey)}`, { method: 'GET' }, 8000);
+    const res = await fetchWithTimeout(`${BASE_URL}?key=${encodeURIComponent(apiKey)}`, { method: 'GET' }, 10000);
     if (!res.ok) return [];
     const data = await res.json();
-    const list = (data?.models || [])
+    const rawModels = data?.models || [];
+
+    const textModels = rawModels
       .filter((m) => Array.isArray(m.supportedGenerationMethods) && m.supportedGenerationMethods.includes('generateContent'))
       .map((m) => String(m.name || '').replace(/^models\//, ''))
       .filter((name) =>
         name &&
         /^gemini-/i.test(name) &&
-        !/embedding|aqa|tts|image|vision|1\.0|1\.5|2\.0-flash(?:-|$)/i.test(name)
-      );
+        !/embedding|aqa|tts|live|transcribe|robotics|computer-use|image|vision|1\.0|1\.5|2\.0-flash(?:-|$)/i.test(name)
+      )
+      .sort((a, b) => scoreDiscoveredModel(a) - scoreDiscoveredModel(b));
 
-    // Prioritize fast/lite models to dodge high-demand queues
-    list.sort((a, b) => {
-      const score = (n) =>
-        (/lite/i.test(n) ? 0 : /flash/i.test(n) ? 1 : 2) +
-        (/3\.8/i.test(n) ? 0 : /3\./i.test(n) ? 3 : /2\.5/i.test(n) ? 6 : 9);
-      return score(a) - score(b);
-    });
+    const imageModels = rawModels
+      .filter((m) => Array.isArray(m.supportedGenerationMethods) && m.supportedGenerationMethods.includes('generateContent'))
+      .map((m) => String(m.name || '').replace(/^models\//, ''))
+      .filter((name) => /nano-banana|image/i.test(name));
 
-    discoveredModelsCache = { key: apiKey, models: list };
-    return list;
+    discoveredModelsCache = {
+      key: apiKey,
+      models: textModels,
+      categorized: {
+        gemini4: textModels.filter((n) => /^gemini-4/i.test(n)),
+        gemini3: textModels.filter((n) => /^gemini-3/i.test(n)),
+        image: imageModels,
+        other: textModels.filter((n) => !/^gemini-(?:4|3)/i.test(n))
+      }
+    };
+    return textModels;
   } catch {
     return [];
   }
 }
 
-async function callGemini({ apiKey, modelName = 'gemini-3.8-flash', prompt, systemInstruction = '', useSearch = false, expectJson = true, onStatus = null }) {
+export async function listAvailableApiModels(apiKey) {
+  if (!apiKey) {
+    throw new Error('Cole e salve sua Gemini API Key antes de verificar os modelos disponíveis.');
+  }
+  const res = await fetchWithTimeout(`${BASE_URL}?key=${encodeURIComponent(apiKey)}`, { method: 'GET' }, 12000);
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `HTTP ${res.status} ao consultar modelos da chave.`);
+  }
+  await discoverActiveGeminiModels(apiKey, true);
+  return discoveredModelsCache.categorized || { gemini4: [], gemini3: [], image: [], other: [] };
+}
+
+async function callGemini({ apiKey, modelName = 'auto-gemini-4', taskType = 'creative', prompt, systemInstruction = '', useSearch = false, expectJson = true, onStatus = null }) {
   if (!apiKey) {
     throw new Error('NO_API_KEY');
   }
 
-  const sanitizedPreferred = (!modelName || modelName === 'gemini-2.0-flash') ? 'gemini-3.8-flash' : modelName;
-  const baseQueue = [
-    sanitizedPreferred,
-    'gemini-3.8-flash',
-    'gemini-3.8-flash-lite',
-    'gemini-2.5-flash',
-    'gemini-2.5-flash-lite',
-    'gemini-3.8-pro'
-  ].filter((v, i, a) => v && a.indexOf(v) === i);
-
+  const baseQueue = getOrchestratorQueue(modelName, taskType);
   const tried = new Set();
   const queue = [...baseQueue];
   let didDiscover = false;
@@ -285,7 +360,7 @@ Retorne EXATAMENTE um JSON com esta estrutura:
 }`;
 
   try {
-    const { text, modelUsed } = await callGemini({ apiKey, modelName, prompt, systemInstruction, expectJson: true, onStatus });
+    const { text, modelUsed } = await callGemini({ apiKey, modelName, taskType: 'creative', prompt, systemInstruction, expectJson: true, onStatus });
     const parsed = cleanJsonResponse(text);
     return { ...parsed, generatedBy: `IA (${modelUsed})` };
   } catch (err) {
@@ -408,7 +483,7 @@ Retorne EXATAMENTE um JSON:
 }`;
 
   try {
-    const { text, modelUsed } = await callGemini({ apiKey, modelName, prompt, expectJson: true, onStatus });
+    const { text, modelUsed } = await callGemini({ apiKey, modelName, taskType: 'dna', prompt, expectJson: true, onStatus });
     const parsed = cleanJsonResponse(text);
     return { ...parsed, generatedBy: `IA (${modelUsed})` };
   } catch (err) {
@@ -501,6 +576,7 @@ Responda APENAS com um JSON válido no formato:
     const { text, modelUsed, sources } = await callGemini({
       apiKey,
       modelName,
+      taskType: 'radar',
       prompt,
       useSearch: true,
       expectJson: false,
@@ -515,6 +591,7 @@ Responda APENAS com um JSON válido no formato:
       const { text, modelUsed } = await callGemini({
         apiKey,
         modelName,
+        taskType: 'radar',
         prompt,
         useSearch: false,
         expectJson: true,
@@ -574,7 +651,7 @@ Retorne EXATAMENTE este JSON:
 }`;
 
   try {
-    const { text, modelUsed } = await callGemini({ apiKey, modelName, prompt, expectJson: true, onStatus });
+    const { text, modelUsed } = await callGemini({ apiKey, modelName, taskType: 'analysis', prompt, expectJson: true, onStatus });
     const parsed = cleanJsonResponse(text);
     return { ...parsed, generatedBy: `Clube IA (${modelUsed})` };
   } catch (err) {
@@ -663,7 +740,7 @@ function analyzeScriptOffline(script, creator) {
 }
 
 // ============================================================================
-// 5. GERADOR DE IMAGEM DE FUNDO PARA CAPA VIA GEMINI / IMAGEN
+// 5. GERADOR DE IMAGEM DE FUNDO PARA CAPA VIA NANO BANANA / GEMINI IMAGE
 // ============================================================================
 
 export async function generateCoverBackground({ imagePrompt, apiKey }) {
@@ -671,25 +748,14 @@ export async function generateCoverBackground({ imagePrompt, apiKey }) {
     throw new Error('Configure sua chave da API Gemini para gerar fundos inéditos com IA (você também pode usar os templates do Estúdio ou subir uma foto).');
   }
 
-  // 1. Try Imagen 3 endpoint
-  try {
-    const res = await fetchWithTimeout(`${BASE_URL}/imagen-3.0-generate-002:predict?key=${encodeURIComponent(apiKey)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        instances: [{ prompt: `${imagePrompt}. Vertical 9:16 aspect ratio, clean high contrast studio lighting, NO text or words in the image.` }],
-        parameters: { sampleCount: 1, aspectRatio: '9:16' }
-      })
-    }, 25000);
-    if (res.ok) {
-      const data = await res.json();
-      const b64 = data?.predictions?.[0]?.bytesBase64Encoded;
-      if (b64) return `data:image/png;base64,${b64}`;
-    }
-  } catch (_) {}
+  const imgModels = [
+    'gemini-nano-banana-2.1',
+    'gemini-3.1-flash-image',
+    'gemini-3-pro-image',
+    'gemini-3.1-flash-lite-image',
+    'gemini-2.5-flash-image'
+  ];
 
-  // 2. Fallback to Gemini multimodal image generation models
-  const imgModels = ['gemini-3.8-flash', 'gemini-2.5-flash-image'];
   for (const m of imgModels) {
     try {
       const res = await fetchWithTimeout(`${BASE_URL}/${m}:generateContent?key=${encodeURIComponent(apiKey)}`, {
@@ -704,7 +770,7 @@ export async function generateCoverBackground({ imagePrompt, apiKey }) {
             responseModalities: ['IMAGE', 'TEXT']
           }
         })
-      }, 25000);
+      }, 30000);
       if (!res.ok) continue;
       const data = await res.json();
       const parts = data?.candidates?.[0]?.content?.parts || [];
@@ -716,7 +782,7 @@ export async function generateCoverBackground({ imagePrompt, apiKey }) {
     } catch (_) {}
   }
 
-  throw new Error('Seu plano/região da chave Gemini não habilitou geração de imagem via API neste momento. Use o botão "Copiar Prompt da Capa" para gerar no Gemini/ImageFX ou use os Fundos Estúdio / Upload de Foto aqui no app!');
+  throw new Error('Seu plano/região da chave Gemini não habilitou geração de imagem via API (Nano Banana) neste momento. Use o botão "Copiar Prompt" para gerar no app Gemini ou use os Fundos Estúdio / Upload de Foto aqui no app!');
 }
 
 // ============================================================================
@@ -769,7 +835,7 @@ Retorne EXATAMENTE este JSON válido (em português natural do Brasil, sem jarg�
 }`;
 
   try {
-    const { text, modelUsed } = await callGemini({ apiKey, modelName, prompt, expectJson: true, onStatus });
+    const { text, modelUsed } = await callGemini({ apiKey, modelName, taskType: 'dna', prompt, expectJson: true, onStatus });
     const parsed = cleanJsonResponse(text);
     return { ...parsed, generatedBy: `IA (${modelUsed})` };
   } catch (err) {

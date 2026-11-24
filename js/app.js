@@ -19,15 +19,24 @@ import {
   searchHotTopics,
   analyzeScript,
   generateCoverBackground,
-  generateCreatorDnaQuickFill
+  generateCreatorDnaQuickFill,
+  listAvailableApiModels
 } from './gemini.js';
-import { COVER_TEMPLATES, renderCoverCanvas, downloadDataUrl } from './cover-studio.js';
+import {
+  COVER_TEMPLATES,
+  renderCoverCanvas,
+  renderCleanCoverExport,
+  saveCoverImage,
+  triggerBlobDownload
+} from './cover-studio.js';
 
 let state = null;
 let currentEditingEpisodeId = null;
 let currentCoverBgDataUrl = '';
 let lastAnalysisOriginalScript = '';
 let lastAnalysisImprovedScript = '';
+let lastCoverExportFallback = null;
+const expandedSeriesIds = new Set();
 
 // Teleprompter state
 let tpInterval = null;
@@ -60,6 +69,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (activeEp) {
     loadEpisodeIntoFactory(activeEp);
   } else {
+    const firstSeries = getCreatorSeries()[0];
+    if (firstSeries) {
+      document.getElementById('f_seriesSelect').value = firstSeries.id;
+      document.getElementById('f_modelSelect').value = firstSeries.modelId || 'serie_01';
+      document.getElementById('cov_seriesLabel').value = firstSeries.name;
+      updateModelRuleHint();
+    }
     renderSeriesPartsStrip();
     await updateCoverPreview();
   }
@@ -346,8 +362,76 @@ function wireModals() {
 
   document.getElementById('openAiModalBtn').addEventListener('click', () => {
     document.getElementById('m_geminiKey').value = state.settings.geminiKey || '';
-    document.getElementById('m_geminiModel').value = state.settings.geminiModel || 'gemini-3.8-flash';
+    const modelSel = document.getElementById('m_geminiModel');
+    const savedModel = state.settings.geminiModel || 'auto-gemini-4';
+    if (!Array.from(modelSel.options).some((o) => o.value === savedModel)) {
+      const opt = document.createElement('option');
+      opt.value = savedModel;
+      opt.textContent = `${savedModel} (Personalizado)`;
+      modelSel.appendChild(opt);
+    }
+    modelSel.value = savedModel;
+    document.getElementById('apiModelsResultBox').classList.add('hidden');
     document.getElementById('aiModal').classList.remove('hidden');
+  });
+
+  document.getElementById('checkApiModelsBtn').addEventListener('click', async () => {
+    const key = document.getElementById('m_geminiKey').value.trim();
+    if (!key) {
+      showToast('Cole sua Gemini API Key acima primeiro.', 'err');
+      return;
+    }
+    state.settings.geminiKey = key;
+    await persist();
+
+    const btn = document.getElementById('checkApiModelsBtn');
+    const resultBox = document.getElementById('apiModelsResultBox');
+    try {
+      const categorized = await runWithStatusTicker(btn, 'Consultando chave...', () => listAvailableApiModels(key));
+      const groups = [
+        { label: '⚡ Linha Gemini 4 (Recomendado)', items: categorized.gemini4 || [], selectable: true },
+        { label: '✨ Linha Gemini 3', items: categorized.gemini3 || [], selectable: true },
+        { label: '🎨 Geração de Imagem (Nano Banana)', items: categorized.image || [], selectable: false },
+        { label: 'Outros modelos compatíveis', items: (categorized.other || []).slice(0, 6), selectable: true }
+      ].filter((g) => g.items.length);
+
+      resultBox.classList.remove('hidden');
+      if (!groups.length) {
+        resultBox.innerHTML = `<div class="muted-sm">Nenhum modelo encontrado nesta chave no momento.</div>`;
+        return;
+      }
+
+      resultBox.innerHTML = `<div class="muted-xs mb-12"><strong>Modelos liberados na sua API agora</strong> (clique em um modelo de texto para selecionar):</div>` +
+        groups.map((g) => `
+          <div class="mb-12">
+            <div class="muted-xs" style="font-weight:700;">${escapeHtml(g.label)}</div>
+            <div class="model-pill-list">
+              ${g.items.map((id) => g.selectable
+                ? `<button type="button" class="model-pill pick-model-pill" data-model="${escapeHtml(id)}">${escapeHtml(id)}</button>`
+                : `<span class="badge-pill">${escapeHtml(id)}</span>`
+              ).join('')}
+            </div>
+          </div>
+        `).join('');
+
+      resultBox.querySelectorAll('.pick-model-pill').forEach((pBtn) => {
+        pBtn.addEventListener('click', () => {
+          const sel = document.getElementById('m_geminiModel');
+          const id = pBtn.dataset.model;
+          if (!Array.from(sel.options).some((o) => o.value === id)) {
+            const opt = document.createElement('option');
+            opt.value = id;
+            opt.textContent = `${id} (Verificado na API)`;
+            sel.appendChild(opt);
+          }
+          sel.value = id;
+          showToast(`Modelo "${id}" selecionado! Clique em Salvar Chave IA.`, 'ok');
+        });
+      });
+    } catch (err) {
+      resultBox.classList.remove('hidden');
+      resultBox.innerHTML = `<div class="muted-sm" style="color:var(--red);">Erro ao consultar chave: ${escapeHtml(err.message)}</div>`;
+    }
   });
 
   document.getElementById('saveAiSettingsBtn').addEventListener('click', async () => {
@@ -357,6 +441,12 @@ function wireModals() {
     updateStatusIndicators();
     document.getElementById('aiModal').classList.add('hidden');
     showToast('Configurações do Google Gemini salvas!', 'ok');
+  });
+
+  document.getElementById('coverExportDirectDownloadBtn').addEventListener('click', () => {
+    if (!lastCoverExportFallback) return;
+    triggerBlobDownload(lastCoverExportFallback.blob, lastCoverExportFallback.dataUrl, lastCoverExportFallback.filename);
+    showToast('Arquivo PNG baixado!', 'ok');
   });
 
   document.getElementById('openDriveModalBtn').addEventListener('click', () => {
@@ -400,8 +490,8 @@ function wireModals() {
         throw new Error('Arquivo de backup inválido.');
       }
       state = imported;
-      if (!state.settings?.geminiModel || /gemini-2\.(0|5)-flash/i.test(state.settings.geminiModel)) {
-        state.settings.geminiModel = 'gemini-3.8-flash';
+      if (!state.settings?.geminiModel || /gemini-2\.|gemini-3\.8-flash-lite|gemini-3\.8-pro|gemini-flash-lite-latest/i.test(state.settings.geminiModel)) {
+        state.settings.geminiModel = 'auto-gemini-4';
       }
       applyTheme(state.settings?.theme || 'light');
       await persist();
@@ -892,14 +982,14 @@ function renderCachedHotTopics() {
 
   container.querySelectorAll('.use-trend-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
-      clearFactoryFields();
+      clearFactoryFields({ keepSeriesFree: true });
       document.getElementById('f_modelSelect').value = btn.dataset.model;
       document.getElementById('f_funnelStage').value = btn.dataset.funnel;
       document.getElementById('f_topic').value = btn.dataset.title;
       document.getElementById('f_qProblem').value = btn.dataset.bridge;
       updateModelRuleHint();
       switchTab('tab-factory');
-      showToast('Tema enviado para a Fábrica! Clique em "Gerar Pacote Completo".', 'ok');
+      showToast('Tema enviado! Escolha livremente a Pasta da Série e o Nº da Parte no Passo 1.', 'ok');
     });
   });
 
@@ -1108,13 +1198,21 @@ function renderQuickFillProfIdeas(profId) {
   });
 }
 
-function renderFactorySeriesSelect() {
+function renderFactorySeriesSelect({ preserveSelection = true } = {}) {
   const sel = document.getElementById('f_seriesSelect');
+  const prevVal = preserveSelection ? sel.value : '';
   const series = getCreatorSeries();
+
   if (!series.length) {
-    sel.innerHTML = `<option value="">-- Crie sua primeira série --</option>`;
-  } else {
-    sel.innerHTML = series.map((s) => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
+    sel.innerHTML = `<option value="">— Crie sua primeira pasta de série —</option>`;
+    return;
+  }
+
+  sel.innerHTML = `<option value="">— Escolha a pasta da série (ou crie ➕ Nova) —</option>` +
+    series.map((s) => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
+
+  if (prevVal && series.some((s) => s.id === prevVal)) {
+    sel.value = prevVal;
   }
 }
 
@@ -1197,18 +1295,29 @@ function wireFactoryTab() {
 
   document.getElementById('f_modelSelect').addEventListener('change', updateModelRuleHint);
 
+  document.getElementById('f_partNumber').addEventListener('input', (e) => {
+    e.target.dataset.manual = e.target.value.trim() ? '1' : '';
+    updateCoverPreview();
+  });
+
   document.getElementById('f_seriesSelect').addEventListener('change', (e) => {
+    document.getElementById('trendSeriesNotice')?.classList.add('hidden');
     const serie = state.series.find((s) => s.id === e.target.value);
+    const partEl = document.getElementById('f_partNumber');
     if (serie) {
       currentEditingEpisodeId = null;
       document.getElementById('f_modelSelect').value = serie.modelId || 'serie_01';
       updateModelRuleHint();
       const eps = state.episodes.filter((ep) => ep.seriesId === serie.id);
       const maxPart = eps.reduce((max, ep) => Math.max(max, Number(ep.partNumber) || 0), 0);
-      document.getElementById('f_partNumber').value = maxPart + 1;
+      if (partEl.dataset.manual !== '1' || !partEl.value.trim()) {
+        partEl.value = maxPart + 1;
+      }
       document.getElementById('cov_seriesLabel').value = serie.name;
       renderSeriesPartsStrip();
       updateCoverPreview();
+    } else {
+      renderSeriesPartsStrip();
     }
   });
 
@@ -1237,15 +1346,20 @@ function wireFactoryTab() {
       createdAt: new Date().toISOString()
     });
     await persist();
-    renderFactorySeriesSelect();
+    renderFactorySeriesSelect({ preserveSelection: false });
     document.getElementById('f_seriesSelect').value = newId;
     document.getElementById('f_modelSelect').value = modelId;
-    document.getElementById('f_partNumber').value = 1;
+    document.getElementById('trendSeriesNotice')?.classList.add('hidden');
+    const partEl = document.getElementById('f_partNumber');
+    if (partEl.dataset.manual !== '1' || !partEl.value.trim()) {
+      partEl.value = 1;
+    }
     document.getElementById('cov_seriesLabel').value = name;
     document.getElementById('ns_name').value = '';
     document.getElementById('newSeriesBox').classList.add('hidden');
     updateModelRuleHint();
     renderSeriesPartsStrip();
+    renderSeriesFolders();
     updateCoverPreview();
     showToast(`Pasta "${name}" criada!`, 'ok');
   });
@@ -1361,21 +1475,30 @@ function wireFactoryTab() {
   });
 
   document.getElementById('downloadCoverBtn').addEventListener('click', async () => {
-    const canvas = document.getElementById('coverCanvas');
-    // Render without safe-zone guides for clean PNG export
-    const exportUrl = await renderCoverCanvas(canvas, {
-      ...getCoverOptions(),
-      showSafeZone: false
-    });
-    const part = document.getElementById('f_partNumber').value || 1;
-    downloadDataUrl(exportUrl, `capa-reels-parte-${part}.png`);
-    // Restore preview with current checkbox
-    await updateCoverPreview();
-    showToast('Capa 1080×1920 PNG baixada!', 'ok');
+    const btn = document.getElementById('downloadCoverBtn');
+    btn.disabled = true;
+    try {
+      const { dataUrl, blob } = await renderCleanCoverExport(getCoverOptions());
+      const part = document.getElementById('f_partNumber').value || 1;
+      const filename = `capa-reels-parte-${part}.png`;
+      const result = await saveCoverImage({ blob, dataUrl, filename });
+
+      if (result.method === 'share') {
+        showToast('Toque em "Salvar Imagem" para salvar no Rolo da Câmera!', 'ok');
+      } else if (result.method === 'fallback_modal') {
+        lastCoverExportFallback = { blob: result.blob, dataUrl, filename };
+        document.getElementById('coverExportImg').src = dataUrl;
+        document.getElementById('coverExportModal').classList.remove('hidden');
+      } else if (result.method === 'download') {
+        showToast('Capa 1080×1920 PNG salva sem guia de área segura!', 'ok');
+      }
+    } finally {
+      btn.disabled = false;
+    }
   });
 
   // Save Episode into Series Folder
-  document.getElementById('saveEpisodeBtn').addEventListener('click', saveCurrentEpisode);
+  document.getElementById('saveEpisodeBtn').addEventListener('click', () => saveCurrentEpisode({ silent: false }));
   document.getElementById('newEpisodeBlankBtn').addEventListener('click', () => {
     clearFactoryFields();
     showToast('Pronto para criar um novo episódio!', 'ok');
@@ -1402,29 +1525,26 @@ async function handleGenerateEpisode() {
   const btn = document.getElementById('generateEpisodeBtn');
 
   try {
-    let seriesId = document.getElementById('f_seriesSelect').value;
+    const seriesSel = document.getElementById('f_seriesSelect');
+    const seriesId = seriesSel.value;
     if (!seriesId) {
-      // Auto-create default series folder if none exists
-      const mId = document.getElementById('f_modelSelect').value;
-      const mObj = SERIES_MODELS.find((m) => m.id === mId) || SERIES_MODELS[0];
-      seriesId = uid('serie');
-      state.series.push({
-        id: seriesId,
-        creatorId: getActiveCreator().id,
-        name: mObj.shortName,
-        modelId: mId,
-        color: getActiveCreator().brandColor || '#8B5CF6',
-        createdAt: new Date().toISOString()
-      });
-      renderFactorySeriesSelect();
-      document.getElementById('f_seriesSelect').value = seriesId;
+      showToast('Escolha uma Pasta da Série no Passo 1 (ou clique em ➕ Nova) antes de gerar.', 'err');
+      seriesSel.focus();
+      seriesSel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
     }
 
     const serie = state.series.find((s) => s.id === seriesId);
-    const partNumber = Number(document.getElementById('f_partNumber').value) || 1;
+    const partInput = document.getElementById('f_partNumber');
+    let partNumber = Number(partInput.value);
+    if (!partNumber || partNumber < 1) {
+      const eps = state.episodes.filter((ep) => ep.seriesId === seriesId);
+      partNumber = eps.reduce((max, ep) => Math.max(max, Number(ep.partNumber) || 0), 0) + 1;
+      partInput.value = partNumber;
+    }
     const modelId = document.getElementById('f_modelSelect').value;
 
-    const generated = await runWithStatusTicker(btn, 'Gerando pacote com Gemini...', (onStatus) =>
+    const generated = await runWithStatusTicker(btn, 'Orquestrando Gemini 4...', (onStatus) =>
       generateCompleteEpisode({
         creator: getActiveCreator(),
         modelId,
@@ -1462,24 +1582,29 @@ async function handleGenerateEpisode() {
     document.getElementById('o_selectedHeadline').value = primaryHeadline;
     document.getElementById('cov_headline').value = primaryHeadline;
     document.getElementById('cov_seriesLabel').value = serie?.name || 'SÉRIE';
+    document.getElementById('trendSeriesNotice')?.classList.add('hidden');
 
     updateScriptTimerBadge();
     await updateCoverPreview();
+
+    // Auto-save into the series folder immediately after generation
+    const saved = await saveCurrentEpisode({ silent: true });
 
     // Activate Roteiro & Headlines output tab and scroll into view on narrow screens
     const outPanel = document.querySelector('#tab-factory .factory-output');
     if (outPanel) {
       outPanel.querySelectorAll('.subtab').forEach((b) => b.classList.toggle('active', b.dataset.subtab === 'out-script'));
       outPanel.querySelectorAll('.subtab-panel').forEach((p) => p.classList.toggle('active', p.id === 'out-script'));
-      if (window.innerWidth <= 1060) {
+      if (window.innerWidth <= 1080) {
         outPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }
     }
 
+    const savedSuffix = saved ? ` e salvo na pasta "${serie?.name}" (Parte ${partNumber})!` : '!';
     if (generated.fallbackReason) {
-      showToast(`Google Gemini está em pico de demanda agora — pacote pronto via Motor Inteligente de Contingência!`, 'ok');
+      showToast(`Google Gemini em pico de demanda — gerado via Contingência${savedSuffix}`, 'ok');
     } else {
-      showToast(`Pacote gerado via ${generated.generatedBy}!`, 'ok');
+      showToast(`Pacote gerado via ${generated.generatedBy}${savedSuffix}`, 'ok');
     }
   } catch (err) {
     showToast(`Erro ao gerar roteiro: ${err.message}`, 'err');
@@ -1540,18 +1665,25 @@ async function updateCoverPreview() {
   await renderCoverCanvas(canvas, getCoverOptions());
 }
 
-async function saveCurrentEpisode() {
+async function saveCurrentEpisode({ silent = false } = {}) {
   const seriesId = document.getElementById('f_seriesSelect').value;
   if (!seriesId) {
-    showToast('Selecione ou crie uma pasta de série antes de salvar.', 'err');
-    return;
+    if (!silent) showToast('Selecione ou crie uma pasta de série antes de salvar.', 'err');
+    return null;
   }
 
-  const canvas = document.getElementById('coverCanvas');
-  const cleanCoverUrl = await renderCoverCanvas(canvas, { ...getCoverOptions(), showSafeZone: false });
-  await updateCoverPreview();
+  const partInput = document.getElementById('f_partNumber');
+  const partNumber = Math.max(1, Number(partInput.value) || 1);
+  partInput.value = partNumber;
 
-  const existing = currentEditingEpisodeId ? state.episodes.find((e) => e.id === currentEditingEpisodeId) : null;
+  const { dataUrl: cleanCoverUrl } = await renderCleanCoverExport(getCoverOptions());
+
+  // Only overwrite existing episode when both seriesId and partNumber match what was loaded
+  const candidate = currentEditingEpisodeId ? state.episodes.find((e) => e.id === currentEditingEpisodeId) : null;
+  const existing = (candidate && candidate.seriesId === seriesId && Number(candidate.partNumber) === partNumber)
+    ? candidate
+    : null;
+
   const chips = Array.from(document.querySelectorAll('#headlinesChips .headline-chip')).map((c) => c.dataset.hl);
   const selectedHl = document.getElementById('o_selectedHeadline').value.trim();
   const headlines = chips.length ? chips : (selectedHl ? [selectedHl] : []);
@@ -1560,7 +1692,7 @@ async function saveCurrentEpisode() {
     id: existing ? existing.id : uid('ep'),
     creatorId: getActiveCreator().id,
     seriesId,
-    partNumber: Number(document.getElementById('f_partNumber').value) || 1,
+    partNumber,
     title: document.getElementById('o_title').value.trim() || document.getElementById('f_topic').value.trim() || 'Episódio sem título',
     onScreenText: document.getElementById('o_onScreenText').value.trim(),
     headlines,
@@ -1593,12 +1725,16 @@ async function saveCurrentEpisode() {
   await persist();
   renderSeriesPartsStrip();
   renderSeriesFolders();
-  showToast('Episódio + Capa 9:16 salvos na Pasta da Série!', 'ok');
+  if (!silent) {
+    showToast(`Parte ${partNumber} + Capa 9:16 salvas na Pasta da Série!`, 'ok');
+  }
+  return payload;
 }
 
 function loadEpisodeIntoFactory(ep) {
   currentEditingEpisodeId = ep.id;
   currentCoverBgDataUrl = ep.coverBgDataUrl || '';
+  document.getElementById('trendSeriesNotice')?.classList.add('hidden');
 
   const serie = state.series.find((s) => s.id === ep.seriesId);
   if (serie) {
@@ -1606,7 +1742,9 @@ function loadEpisodeIntoFactory(ep) {
     document.getElementById('f_modelSelect').value = serie.modelId || 'serie_01';
     updateModelRuleHint();
   }
-  document.getElementById('f_partNumber').value = ep.partNumber || 1;
+  const partEl = document.getElementById('f_partNumber');
+  partEl.value = ep.partNumber || 1;
+  partEl.dataset.manual = '1';
   document.getElementById('f_topic').value = ep.title || '';
   document.getElementById('f_funnelStage').value = ep.funnelStage || 'topo';
   document.getElementById('f_viralGoal').value = ep.viralGoal || 'share';
@@ -1633,22 +1771,39 @@ function loadEpisodeIntoFactory(ep) {
   updateCoverPreview();
 }
 
-function clearFactoryFields() {
+function clearFactoryFields({ keepSeriesFree = false } = {}) {
   currentEditingEpisodeId = null;
   currentCoverBgDataUrl = '';
-  const seriesId = document.getElementById('f_seriesSelect').value;
-  const serie = state.series.find((s) => s.id === seriesId);
-  const eps = state.episodes.filter((ep) => ep.seriesId === seriesId);
-  const maxPart = eps.reduce((m, e) => Math.max(m, Number(e.partNumber) || 0), 0);
+  const seriesSel = document.getElementById('f_seriesSelect');
+  const partEl = document.getElementById('f_partNumber');
+  const notice = document.getElementById('trendSeriesNotice');
 
-  document.getElementById('f_partNumber').value = maxPart + 1;
+  let serie = null;
+  let nextPartLabel = '';
+
+  if (keepSeriesFree) {
+    seriesSel.value = '';
+    partEl.value = '';
+    partEl.dataset.manual = '';
+    notice?.classList.remove('hidden');
+  } else {
+    notice?.classList.add('hidden');
+    const seriesId = seriesSel.value;
+    serie = state.series.find((s) => s.id === seriesId);
+    const eps = state.episodes.filter((ep) => ep.seriesId === seriesId);
+    const maxPart = eps.reduce((m, e) => Math.max(m, Number(e.partNumber) || 0), 0);
+    partEl.value = maxPart + 1;
+    partEl.dataset.manual = '';
+    nextPartLabel = serie ? `${serie.name} • Parte ${maxPart + 1}` : '';
+  }
+
   document.getElementById('f_topic').value = '';
   document.getElementById('f_qProblem').value = '';
   document.getElementById('f_qLearn').value = '';
   document.getElementById('f_qLifeChange').value = '';
   document.getElementById('o_title').value = '';
   document.getElementById('o_status').value = 'roteiro';
-  document.getElementById('o_onScreenText').value = serie ? `${serie.name} • Parte ${maxPart + 1}` : '';
+  document.getElementById('o_onScreenText').value = nextPartLabel;
   document.getElementById('o_script').value = '';
   document.getElementById('o_caption').value = '';
   document.getElementById('o_editingPrompt').value = '';
@@ -1811,7 +1966,7 @@ function wireClubAndTeleprompter() {
     document.getElementById('clubAfterStats').textContent = `${stats.words} pal. • ~${stats.secs}s`;
   });
 
-  document.getElementById('applyClubFixBtn').addEventListener('click', () => {
+  document.getElementById('applyClubFixBtn').addEventListener('click', async () => {
     const taEl = document.getElementById('clubAfterTextarea');
     const approvedText = (!taEl.classList.contains('hidden') ? taEl.value : lastAnalysisImprovedScript) || '';
     if (!approvedText.trim()) return;
@@ -1820,6 +1975,16 @@ function wireClubAndTeleprompter() {
     document.getElementById('o_script').value = approvedText;
     updateScriptTimerBadge();
     updateTeleprompterText(approvedText);
+
+    if (currentEditingEpisodeId) {
+      const ep = state.episodes.find((item) => item.id === currentEditingEpisodeId);
+      if (ep) {
+        ep.script = approvedText;
+        ep.updatedAt = new Date().toISOString();
+        await persist();
+        renderSeriesFolders();
+      }
+    }
     showToast('Versão otimizada aprovada e aplicada na Fábrica e Teleprompter!', 'ok');
   });
 
@@ -1925,96 +2090,116 @@ function wireLibraryTab() {
 
 function renderSeriesFolders() {
   const grid = document.getElementById('seriesFoldersGrid');
-  const detail = document.getElementById('seriesDetailPanel');
   const series = getCreatorSeries();
 
   if (!series.length) {
     grid.innerHTML = `<div class="card"><h3>Nenhuma pasta de série ainda</h3><p class="muted-sm mt-6">Crie uma série na Fábrica de Roteiros ou importe uma profissão no DNA do Criador.</p></div>`;
-    detail.classList.add('hidden');
     return;
   }
 
   grid.innerHTML = series.map((s) => {
-    const eps = state.episodes.filter((e) => e.seriesId === s.id);
+    const eps = state.episodes
+      .filter((e) => e.seriesId === s.id)
+      .sort((a, b) => (Number(a.partNumber) || 0) - (Number(b.partNumber) || 0));
     const model = SERIES_MODELS.find((m) => m.id === s.modelId);
     const pct = Math.min(100, Math.round((eps.length / 15) * 100));
+    const isExpanded = expandedSeriesIds.has(s.id);
+    const nextPart = eps.reduce((m, e) => Math.max(m, Number(e.partNumber) || 0), 0) + 1;
+
     return `
-      <div class="card series-card" style="border-top-color:${escapeHtml(s.color || '#EC4899')}" data-series-id="${s.id}">
-        <div class="label-between">
-          <span class="badge-pill">${escapeHtml(model?.code || 'Série')}</span>
-          <span class="muted-xs">${eps.length} / 15 partes</span>
+      <div class="card series-card ${isExpanded ? 'expanded' : ''}" style="border-top-color:${escapeHtml(s.color || '#8B5CF6')}" data-series-id="${s.id}">
+        <div class="series-card-header" role="button" tabindex="0" aria-expanded="${isExpanded}">
+          <div class="label-between">
+            <span class="badge-pill">${escapeHtml(model?.code || 'Série')}</span>
+            <span class="muted-xs">${eps.length} / 15 partes</span>
+          </div>
+          <h3 class="mt-8">${isExpanded ? '📂' : '📁'} ${escapeHtml(s.name)}</h3>
+          <div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div>
+          <div class="label-between" style="margin-bottom:0;">
+            <span class="muted-xs">${eps.length >= 15 ? '🏆 Meta de 15 partes atingida!' : `Faltam ${15 - eps.length} partes p/ maturidade`}</span>
+            <span class="series-toggle-hint">${isExpanded ? '▴ Minimizar' : '▾ Abrir pasta'}</span>
+          </div>
         </div>
-        <h3 class="mt-8">📁 ${escapeHtml(s.name)}</h3>
-        <div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div>
-        <div class="muted-xs">${eps.length >= 15 ? '🏆 Meta de consistência (15 partes) atingida!' : `Faltam ${15 - eps.length} partes p/ maturidade do algoritmo`}</div>
+
+        ${isExpanded ? `
+          <div class="series-inline-body">
+            <div class="card-row mb-12">
+              <div class="muted-sm"><strong>${eps.length}</strong> episódio(s) nesta pasta</div>
+              <div class="inline-controls">
+                <button type="button" class="btn btn-gradient btn-sm create-next-part-btn" data-id="${s.id}" data-next="${nextPart}" data-model="${escapeHtml(s.modelId || 'serie_01')}">➕ Criar Parte ${nextPart}</button>
+                <button type="button" class="btn btn-danger-outline btn-sm delete-series-btn" data-id="${s.id}" data-name="${escapeHtml(s.name)}">🗑️ Excluir Pasta</button>
+              </div>
+            </div>
+
+            ${eps.length ? eps.map((ep) => `
+              <div class="episode-row">
+                <div class="inline-controls" style="gap:12px;">
+                  ${ep.coverDataUrl ? `<img class="ep-thumb" src="${ep.coverDataUrl}" alt="Capa" />` : `<div class="ep-thumb" style="display:grid;place-items:center;font-size:11px;color:var(--text-muted);">P.${ep.partNumber}</div>`}
+                  <div>
+                    <strong>Parte ${ep.partNumber}: ${escapeHtml(ep.title)}</strong>
+                    <div class="muted-xs mt-6">Status: <strong>${escapeHtml(ep.status || 'roteiro')}</strong> • ${ep.script ? 'Roteiro pronto' : 'Ideia aguardando geração'}</div>
+                  </div>
+                </div>
+                <div class="inline-controls">
+                  <button type="button" class="btn btn-primary btn-sm open-ep-btn" data-id="${ep.id}">✏️ Abrir / Gerar</button>
+                  <button type="button" class="btn btn-danger-outline btn-sm del-ep-btn" data-id="${ep.id}">✕</button>
+                </div>
+              </div>
+            `).join('') : `<p class="muted-sm">Nenhum episódio nesta pasta ainda.</p>`}
+          </div>
+        ` : ''}
       </div>
     `;
   }).join('');
 
-  grid.querySelectorAll('.series-card').forEach((card) => {
-    card.addEventListener('click', () => openSeriesDetail(card.dataset.seriesId));
-  });
-}
-
-function openSeriesDetail(seriesId) {
-  const serie = state.series.find((s) => s.id === seriesId);
-  if (!serie) return;
-  const detail = document.getElementById('seriesDetailPanel');
-  const eps = state.episodes
-    .filter((e) => e.seriesId === seriesId)
-    .sort((a, b) => (a.partNumber || 0) - (b.partNumber || 0));
-  const nextPart = eps.reduce((m, e) => Math.max(m, Number(e.partNumber) || 0), 0) + 1;
-
-  detail.classList.remove('hidden');
-  detail.innerHTML = `
-    <div class="card-row mb-12">
-      <div>
-        <h3>📂 Pasta: ${escapeHtml(serie.name)}</h3>
-        <p class="muted-sm">${eps.length} episódio(s) salvo(s)</p>
-      </div>
-      <div class="inline-controls">
-        <button id="createNextPartBtn" class="btn btn-gradient btn-sm">➕ Criar Parte ${nextPart}</button>
-        <button id="deleteSeriesBtn" class="btn btn-danger-outline btn-sm">🗑️ Excluir Pasta</button>
-      </div>
-    </div>
-    ${eps.length ? eps.map((ep) => `
-      <div class="episode-row">
-        <div class="inline-controls" style="gap:12px;">
-          ${ep.coverDataUrl ? `<img class="ep-thumb" src="${ep.coverDataUrl}" alt="Capa" />` : `<div class="ep-thumb" style="display:grid;place-items:center;font-size:11px;color:#94a3b8;">P.${ep.partNumber}</div>`}
-          <div>
-            <strong>Parte ${ep.partNumber}: ${escapeHtml(ep.title)}</strong>
-            <div class="muted-xs mt-6">Status: <strong>${escapeHtml(ep.status || 'roteiro')}</strong> • ${ep.script ? 'Roteiro pronto' : 'Ideia aguardando geração'}</div>
-          </div>
-        </div>
-        <div class="inline-controls">
-          <button class="btn btn-primary btn-sm open-ep-btn" data-id="${ep.id}">✏️ Abrir / Gerar</button>
-          <button class="btn btn-danger-outline btn-sm del-ep-btn" data-id="${ep.id}">✕</button>
-        </div>
-      </div>
-    `).join('') : `<p class="muted-sm">Nenhum episódio nesta pasta ainda.</p>`}
-  `;
-
-  document.getElementById('createNextPartBtn').addEventListener('click', () => {
-    document.getElementById('f_seriesSelect').value = serie.id;
-    document.getElementById('f_modelSelect').value = serie.modelId;
-    clearFactoryFields();
-    document.getElementById('f_partNumber').value = nextPart;
-    updateModelRuleHint();
-    switchTab('tab-factory');
+  grid.querySelectorAll('.series-card-header').forEach((hdr) => {
+    const toggle = () => {
+      const card = hdr.closest('.series-card');
+      const sId = card?.dataset.seriesId;
+      if (!sId) return;
+      if (expandedSeriesIds.has(sId)) {
+        expandedSeriesIds.delete(sId);
+      } else {
+        expandedSeriesIds.add(sId);
+      }
+      renderSeriesFolders();
+    };
+    hdr.addEventListener('click', toggle);
+    hdr.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        toggle();
+      }
+    });
   });
 
-  document.getElementById('deleteSeriesBtn').addEventListener('click', async () => {
-    if (!confirm(`Excluir a pasta "${serie.name}" e todos os seus episódios?`)) return;
-    state.series = state.series.filter((s) => s.id !== serie.id);
-    state.episodes = state.episodes.filter((e) => e.seriesId !== serie.id);
-    await persist();
-    detail.classList.add('hidden');
-    renderFactorySeriesSelect();
-    renderSeriesFolders();
-    showToast('Pasta excluída.', 'ok');
+  grid.querySelectorAll('.create-next-part-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      document.getElementById('f_seriesSelect').value = btn.dataset.id;
+      document.getElementById('f_modelSelect').value = btn.dataset.model;
+      clearFactoryFields();
+      document.getElementById('f_partNumber').value = btn.dataset.next;
+      updateModelRuleHint();
+      switchTab('tab-factory');
+    });
   });
 
-  detail.querySelectorAll('.open-ep-btn').forEach((btn) => {
+  grid.querySelectorAll('.delete-series-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const sId = btn.dataset.id;
+      if (!confirm(`Excluir a pasta "${btn.dataset.name}" e todos os seus episódios?`)) return;
+      expandedSeriesIds.delete(sId);
+      state.series = state.series.filter((s) => s.id !== sId);
+      state.episodes = state.episodes.filter((e) => e.seriesId !== sId);
+      await persist();
+      renderFactorySeriesSelect();
+      renderSeriesPartsStrip();
+      renderSeriesFolders();
+      showToast('Pasta excluída.', 'ok');
+    });
+  });
+
+  grid.querySelectorAll('.open-ep-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
       const ep = state.episodes.find((e) => e.id === btn.dataset.id);
       if (ep) {
@@ -2024,17 +2209,15 @@ function openSeriesDetail(seriesId) {
     });
   });
 
-  detail.querySelectorAll('.del-ep-btn').forEach((btn) => {
+  grid.querySelectorAll('.del-ep-btn').forEach((btn) => {
     btn.addEventListener('click', async () => {
       state.episodes = state.episodes.filter((e) => e.id !== btn.dataset.id);
       await persist();
-      openSeriesDetail(seriesId);
+      renderSeriesPartsStrip();
       renderSeriesFolders();
       showToast('Episódio removido.', 'ok');
     });
   });
-
-  detail.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
 function renderCatalog() {

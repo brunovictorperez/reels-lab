@@ -21,10 +21,10 @@ export function createDefaultState() {
   const serie2Id = 'serie_default_2';
 
   return {
-    version: 2,
+    version: 3,
     settings: {
       geminiKey: '',
-      geminiModel: 'gemini-3.8-flash',
+      geminiModel: 'auto-gemini-4',
       theme: 'light',
       driveWebhookUrl: '',
       lastDriveSync: null,
@@ -184,9 +184,9 @@ export async function loadState() {
 function mergeDefaults(loaded) {
   const def = createDefaultState();
   const mergedSettings = { ...def.settings, ...(loaded.settings || {}) };
-  // Migrate deprecated/legacy Gemini model IDs saved in browser storage
-  if (!mergedSettings.geminiModel || /gemini-2\.(0|5)-flash/i.test(mergedSettings.geminiModel)) {
-    mergedSettings.geminiModel = 'gemini-3.8-flash';
+  // Migrate deprecated/legacy Gemini model IDs saved in browser storage to the Gemini 4 Orchestrator
+  if (!mergedSettings.geminiModel || /gemini-2\.|gemini-3\.8-flash-lite|gemini-3\.8-pro|gemini-flash-lite-latest/i.test(mergedSettings.geminiModel)) {
+    mergedSettings.geminiModel = 'auto-gemini-4';
   }
   if (mergedSettings.theme !== 'light' && mergedSettings.theme !== 'dark') {
     mergedSettings.theme = 'light';
