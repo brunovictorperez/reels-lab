@@ -1027,7 +1027,202 @@ function throwDetailedRadarError({ rawCount = 0, dateFilter = 'any', appsScriptD
   if (appsScriptDiag === 'outdated_deployment') {
     throw new Error('Seu Google Apps Script ainda está executando a versão antiga: abra script.google.com, cole o novo google-apps-script.gs v9, execute "autorizarGoogleNoticias" 1x e publique em Implantar → Gerenciar implantações → Editar → Nova versão.');
   }
-  throw new Error(`Não foi possível acessar as notícias reais do Google Notícias nesta rede agora (${appsScriptDetail || 'proxies RSS públicos indisponíveis'}). Atualize e autorize o Google Apps Script v9 ou tente novamente em instantes.`);
+  throw new Error(`Não foi possível acessar as notícias reais do Google Notícias nesta rede agora (${appsScriptDetail || 'proxies RSS públicos indisponíveis'}). Atualize e autorize o Google Apps Script v13 ou tente novamente em instantes.`);
+}
+
+export function parseTrends24BrazilHtml(html = '', nowIso = new Date().toISOString()) {
+  const out = [];
+  if (!html) return out;
+  const seen = new Set();
+  const ignoreRe = /^(trends24|brazil|brasil|worldwide|home|login|signup|about|privacy|terms|twitter|trends|trending|search|all)$/i;
+  const olRegex = /<ol[^>]*>([\s\S]*?)<\/ol>/gi;
+  let olMatch;
+  while ((olMatch = olRegex.exec(html)) !== null && out.length < 35) {
+    const olHtml = olMatch[1];
+    const liRegex = /<li[^>]*>([\s\S]*?)<\/li>/gi;
+    let liMatch;
+    while ((liMatch = liRegex.exec(olHtml)) !== null && out.length < 35) {
+      const liBody = liMatch[1];
+      const aMatch = liBody.match(/<a[^>]*>([\s\S]*?)<\/a>/i);
+      const rawTitle = aMatch ? decodeXmlEntities(aMatch[1]) : '';
+      if (!rawTitle || rawTitle.length < 2 || rawTitle.length > 90 || ignoreRe.test(rawTitle)) continue;
+      const countMatch = liBody.match(/class=["'][^"']*(?:tweet-count|count|volume)[^"']*["'][^>]*>([\s\S]*?)<\/span>/i);
+      const volume = countMatch ? decodeXmlEntities(countMatch[1]) : '';
+      const normKey = rawTitle.toLowerCase();
+      if (seen.has(normKey)) continue;
+      seen.add(normKey);
+      out.push({
+        title: rawTitle,
+        topicTag: rawTitle,
+        link: `https://x.com/search?q=${encodeURIComponent(rawTitle)}&src=trend_click`,
+        pubDate: nowIso,
+        publishedAt: formatTrendDate(nowIso),
+        sourceName: 'Trends24 · X Brasil',
+        volume,
+        summary: volume ? `Volume reportado no X: ${volume}` : 'Assunto em alta nos Trending Topics do X Brasil.',
+        channel: 'X Brasil (3 dias)',
+        categoryId: 'x_brasil',
+        categoryLabel: '𝕏 Brasil (3 dias)'
+      });
+    }
+  }
+  return out;
+}
+
+export function parseGetDayTrendsBrazilHtml(html = '', nowIso = new Date().toISOString()) {
+  const out = [];
+  if (!html) return out;
+  const seen = new Set();
+  const linkRegex = /<a[^>]+href=["'][^"']*\/brazil\/trend\/[^"']*["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let match;
+  while ((match = linkRegex.exec(html)) !== null && out.length < 30) {
+    const cleanTitle = decodeXmlEntities(match[1]);
+    if (!cleanTitle || cleanTitle.length < 2 || cleanTitle.length > 90) continue;
+    const normKey = cleanTitle.toLowerCase();
+    if (seen.has(normKey)) continue;
+    seen.add(normKey);
+    out.push({
+      title: cleanTitle,
+      topicTag: cleanTitle,
+      link: `https://x.com/search?q=${encodeURIComponent(cleanTitle)}&src=trend_click`,
+      pubDate: nowIso,
+      publishedAt: formatTrendDate(nowIso),
+      sourceName: 'GetDayTrends · X Brasil',
+      volume: '',
+      summary: 'Trending Topic capturado no ranking Brasil do X.',
+      channel: 'X Brasil (3 dias)',
+      categoryId: 'x_brasil',
+      categoryLabel: '𝕏 Brasil (3 dias)'
+    });
+  }
+  return out;
+}
+
+async function fetchHtmlViaPublicRelays(targetUrl) {
+  const encoded = encodeURIComponent(targetUrl);
+  return raceFirstNonEmpty([
+    (async () => {
+      const res = await fetchWithTimeout(`https://api.allorigins.win/get?url=${encoded}`, { method: 'GET' }, 8000);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (!data?.contents) throw new Error('empty');
+      return data.contents;
+    })(),
+    (async () => {
+      const res = await fetchWithTimeout(`https://api.codetabs.com/v1/proxy?quest=${encoded}`, { method: 'GET' }, 8000);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const txt = await res.text();
+      if (!txt) throw new Error('empty');
+      return txt;
+    })(),
+    (async () => {
+      const res = await fetchWithTimeout(`https://api.allorigins.win/raw?url=${encoded}`, { method: 'GET' }, 8000);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const txt = await res.text();
+      if (!txt) throw new Error('empty');
+      return txt;
+    })()
+  ]);
+}
+
+export async function fetchXBrazilTrends3Days({ driveWebhookUrl = '', onStatus = null } = {}) {
+  if (typeof onStatus === 'function') onStatus('Buscando Trending Topics do X Brasil (últimos 3 dias)...');
+
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const threeDaysMs = 3 * 24 * 60 * 60 * 1000;
+  let rawItems = [];
+  let fetchedFrom = 'X Brasil · Relays Públicos (3 dias)';
+  let appsScriptDiag = driveWebhookUrl ? 'pending' : 'no_url';
+
+  if (driveWebhookUrl) {
+    try {
+      const res = await fetchWithTimeout(driveWebhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ action: 'fetch_x_trends' })
+      }, 15000);
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.ok && Array.isArray(data.items) && data.items.length) {
+          rawItems = data.items;
+          fetchedFrom = 'Google Apps Script · X Brasil (3 dias)';
+          appsScriptDiag = 'ok';
+        } else if (data?.needsAuth) {
+          appsScriptDiag = 'needs_auth';
+        } else if (!data?.version) {
+          appsScriptDiag = 'outdated_deployment';
+        }
+      }
+    } catch {
+      appsScriptDiag = 'script_unreachable';
+    }
+  }
+
+  if (!rawItems.length) {
+    const xRssFeed = {
+      label: 'X Brasil (3 dias)',
+      categoryId: 'x_brasil',
+      url: `https://news.google.com/rss/search?q=${encodeURIComponent('(twitter OR "no X" OR "trending topics" OR viralizou OR "assuntos mais comentados") brasil when:3d')}&hl=pt-BR&gl=BR&ceid=BR:pt`
+    };
+    const [t24Res, gdtRes, rssRes] = await Promise.allSettled([
+      fetchHtmlViaPublicRelays('https://trends24.in/brazil/').then((html) => parseTrends24BrazilHtml(html, nowIso)),
+      fetchHtmlViaPublicRelays('https://getdaytrends.com/brazil/').then((html) => parseGetDayTrendsBrazilHtml(html, nowIso)),
+      fetchSingleRssFeed(xRssFeed, 25).then((items) =>
+        items.map((it) => ({
+          ...it,
+          topicTag: it.title,
+          sourceName: `X / ${it.sourceName || 'Notícias'}`,
+          channel: 'X Brasil (3 dias)',
+          categoryId: 'x_brasil',
+          categoryLabel: '𝕏 Brasil (3 dias)'
+        }))
+      )
+    ]);
+
+    if (t24Res.status === 'fulfilled' && Array.isArray(t24Res.value)) rawItems.push(...t24Res.value);
+    if (gdtRes.status === 'fulfilled' && Array.isArray(gdtRes.value)) rawItems.push(...gdtRes.value);
+    if (rssRes.status === 'fulfilled' && Array.isArray(rssRes.value)) rawItems.push(...rssRes.value);
+  }
+
+  const deduped = [];
+  const seenTitles = new Set();
+  for (const item of rawItems) {
+    const cleanTitle = String(item?.title || '').trim();
+    if (!cleanTitle) continue;
+    const ts = item.pubDate ? Date.parse(item.pubDate) : nowMs;
+    if (!Number.isNaN(ts) && (nowMs - ts) > threeDaysMs) continue;
+    const normKey = cleanTitle.toLowerCase();
+    if (seenTitles.has(normKey)) continue;
+    seenTitles.add(normKey);
+    deduped.push({
+      ...item,
+      title: cleanTitle,
+      topicTag: item.topicTag || cleanTitle,
+      link: item.link || `https://x.com/search?q=${encodeURIComponent(cleanTitle)}&src=trend_click`,
+      pubDate: item.pubDate || nowIso,
+      publishedAt: item.publishedAt || formatTrendDate(item.pubDate || nowIso),
+      sourceName: item.sourceName || 'X Brasil',
+      channel: 'X Brasil (3 dias)',
+      categoryId: 'x_brasil',
+      categoryLabel: '𝕏 Brasil (3 dias)'
+    });
+  }
+
+  const items = deduped.slice(0, 45);
+  if (!items.length) {
+    if (appsScriptDiag === 'needs_auth') {
+      throw new Error('Autorize o Google Apps Script (execute "autorizarGoogleNoticias" 1x em script.google.com) ou tente novamente em instantes.');
+    }
+    throw new Error('Não foi possível carregar os Trending Topics do X Brasil no momento. Verifique sua conexão ou atualize o Google Apps Script para v13.');
+  }
+
+  return {
+    items,
+    fetchedFrom,
+    appsScriptDiag,
+    fetchedAt: nowIso
+  };
 }
 
 export async function fetchGoogleNewsPortal({ categoryId = 'brasil', subCategoryId = 'todas', focusQuery = '', dateFilter = 'any', driveWebhookUrl = '', onStatus = null } = {}) {
@@ -1217,12 +1412,12 @@ export function detectBestSeriesModelId({ title = '', funnel = '', suggestedMode
   return 'codigo_viral';
 }
 
-export async function generateAnglesFromSelectedNews({ creator, articles = [], focusQuery = '', count = 5, apiKey, modelName = 'gemini-4-hydrogen', onStatus = null }) {
+export async function generateAnglesFromSelectedNews({ creator, articles = [], focusQuery = '', count = 5, apiKey, modelName = 'gemini-4-hydrogen', onStatus = null, sourceLabel = 'GOOGLE NOTÍCIAS BRASIL (https://news.google.com/)' }) {
   if (!apiKey) {
     throw new Error('Configure sua Gemini API Key antes de gerar roteiros.');
   }
   if (!Array.isArray(articles) || !articles.length) {
-    throw new Error('Nenhuma notícia real do Google News foi fornecida para gerar conteúdos.');
+    throw new Error('Nenhuma notícia ou trend real foi fornecido para gerar conteúdos.');
   }
 
   const feedSlice = articles.slice(0, 24);
@@ -1234,7 +1429,7 @@ export async function generateAnglesFromSelectedNews({ creator, articles = [], f
   ).join('\n');
 
   const prompt = `Hoje é ${today}.
-Abaixo estão ${feedSlice.length} NOTÍCIAS REAIS COLETADAS AGORA DO GOOGLE NOTÍCIAS BRASIL (https://news.google.com/):
+Abaixo estão ${feedSlice.length} ASSUNTOS / NOTÍCIAS REAIS COLETADOS AGORA (${sourceLabel}):
 
 ${formattedFeed}
 

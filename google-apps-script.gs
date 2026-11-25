@@ -15,6 +15,8 @@
 
 var ROOT_FOLDER_NAME = 'Reels Lab - Studio';
 var BACKUP_FILE_NAME = 'reels-lab-database.json';
+var PROFILE_HISTORY_FILE_NAME = 'reels-lab-profile-history.json';
+var X_TRENDS_CACHE_FILE_NAME = 'reels-lab-x-trends-3d.json';
 
 /**
  * Execute esta função UMA VEZ no editor do Apps Script (botão ▶ Executar)
@@ -128,6 +130,112 @@ function getRootFolder_() {
   return getOrCreateFolder_(DriveApp.getRootFolder(), ROOT_FOLDER_NAME);
 }
 
+function readJsonFileFromFolder_(folder, fileName) {
+  try {
+    var files = folder.getFilesByName(fileName);
+    if (!files.hasNext()) return null;
+    var content = files.next().getBlob().getDataAsString('UTF-8');
+    return JSON.parse(content);
+  } catch (e) {
+    return null;
+  }
+}
+
+function writeJsonFileToFolder_(folder, fileName, obj) {
+  var jsonStr = JSON.stringify(obj, null, 2);
+  var existing = folder.getFilesByName(fileName);
+  if (existing.hasNext()) {
+    existing.next().setContent(jsonStr);
+  } else {
+    folder.createFile(fileName, jsonStr, MimeType.PLAIN_TEXT);
+  }
+}
+
+function mergeProfileHistoryGAS_(existing, incoming) {
+  var listA = Array.isArray(existing) ? existing : [];
+  var listB = Array.isArray(incoming) ? incoming : [];
+  var byKey = {};
+  var addEntry = function (entry) {
+    if (!entry || !entry.snapshot) return;
+    var key = entry.id || ((entry.creatorId || 'creator') + '::' + (entry.savedAt || ''));
+    var prev = byKey[key];
+    if (!prev || new Date(entry.savedAt || 0).getTime() >= new Date(prev.savedAt || 0).getTime()) {
+      byKey[key] = entry;
+    }
+  };
+  listA.forEach(addEntry);
+  listB.forEach(addEntry);
+  var out = Object.keys(byKey).map(function (k) { return byKey[k]; });
+  out.sort(function (a, b) {
+    return new Date(b.savedAt || 0).getTime() - new Date(a.savedAt || 0).getTime();
+  });
+  return out.slice(0, 120);
+}
+
+function parseTrends24HtmlGAS_(html, nowIso) {
+  var out = [];
+  if (!html) return out;
+  var seen = {};
+  var ignoreRe = /^(trends24|brazil|brasil|worldwide|home|login|signup|about|privacy|terms|twitter|trends|trending|search|all)$/i;
+  var cardRegex = /<ol[^>]*>([\s\S]*?)<\/ol>/gi;
+  var olMatch;
+  while ((olMatch = cardRegex.exec(html)) !== null && out.length < 35) {
+    var olHtml = olMatch[1];
+    var liRegex = /<li[^>]*>([\s\S]*?)<\/li>/gi;
+    var liMatch;
+    while ((liMatch = liRegex.exec(olHtml)) !== null && out.length < 35) {
+      var liBody = liMatch[1];
+      var aMatch = liBody.match(/<a[^>]*>([\s\S]*?)<\/a>/i);
+      var rawTitle = aMatch ? decodeGasEntities_(aMatch[1]) : '';
+      if (!rawTitle || rawTitle.length < 2 || rawTitle.length > 90 || ignoreRe.test(rawTitle)) continue;
+      var countMatch = liBody.match(/class=["'][^"']*(?:tweet-count|count|volume)[^"']*["'][^>]*>([\s\S]*?)<\/span>/i);
+      var volume = countMatch ? decodeGasEntities_(countMatch[1]) : '';
+      var normKey = rawTitle.toLowerCase();
+      if (seen[normKey]) continue;
+      seen[normKey] = true;
+      out.push({
+        title: rawTitle,
+        topicTag: rawTitle,
+        link: 'https://x.com/search?q=' + encodeURIComponent(rawTitle) + '&src=trend_click',
+        pubDate: nowIso,
+        sourceName: 'Trends24 · X Brasil',
+        volume: volume,
+        summary: volume ? ('Volume reportado no X: ' + volume) : 'Assunto em alta nos Trending Topics do X Brasil.',
+        channel: 'X Brasil (3 dias)',
+        categoryId: 'x_brasil'
+      });
+    }
+  }
+  return out;
+}
+
+function parseGetDayTrendsHtmlGAS_(html, nowIso) {
+  var out = [];
+  if (!html) return out;
+  var seen = {};
+  var linkRegex = /<a[^>]+href=["'][^"']*\/brazil\/trend\/[^"']*["'][^>]*>([\s\S]*?)<\/a>/gi;
+  var m;
+  while ((m = linkRegex.exec(html)) !== null && out.length < 30) {
+    var cleanTitle = decodeGasEntities_(m[1]);
+    if (!cleanTitle || cleanTitle.length < 2 || cleanTitle.length > 90) continue;
+    var normKey = cleanTitle.toLowerCase();
+    if (seen[normKey]) continue;
+    seen[normKey] = true;
+    out.push({
+      title: cleanTitle,
+      topicTag: cleanTitle,
+      link: 'https://x.com/search?q=' + encodeURIComponent(cleanTitle) + '&src=trend_click',
+      pubDate: nowIso,
+      sourceName: 'GetDayTrends · X Brasil',
+      volume: '',
+      summary: 'Trending Topic capturado no ranking Brasil do X.',
+      channel: 'X Brasil (3 dias)',
+      categoryId: 'x_brasil'
+    });
+  }
+  return out;
+}
+
 function jsonResponse_(obj) {
   return ContentService
     .createTextOutput(JSON.stringify(obj))
@@ -149,11 +257,21 @@ function doGet(e) {
       return jsonResponse_({ ok: true, found: true, data: JSON.parse(content), updatedAt: file.getLastUpdated() });
     }
 
-    if (action === 'ping_news') {
-      return jsonResponse_({ ok: true, version: 'v9', status: 'Reels Lab Google Notícias v9 ativo' });
+    if (action === 'list_profile_history') {
+      var histData = readJsonFileFromFolder_(root, PROFILE_HISTORY_FILE_NAME);
+      var histItems = Array.isArray(histData) ? histData : (histData && Array.isArray(histData.items) ? histData.items : []);
+      if (!histItems.length) {
+        var bkp = readJsonFileFromFolder_(root, BACKUP_FILE_NAME);
+        if (bkp && Array.isArray(bkp.profileHistory)) histItems = bkp.profileHistory;
+      }
+      return jsonResponse_({ ok: true, version: 'v13', items: histItems });
     }
 
-    return jsonResponse_({ ok: true, version: 'v9', status: 'Reels Lab Drive Sync ativo', folder: root.getName() });
+    if (action === 'ping_news') {
+      return jsonResponse_({ ok: true, version: 'v13', status: 'Reels Lab Google Notícias & X Brasil v13 ativo' });
+    }
+
+    return jsonResponse_({ ok: true, version: 'v13', status: 'Reels Lab Drive Sync ativo', folder: root.getName() });
   } catch (err) {
     return jsonResponse_({ ok: false, error: err.message });
   }
@@ -165,7 +283,98 @@ function doPost(e) {
     var action = payload.action || 'sync';
 
     if (action === 'ping_news') {
-      return jsonResponse_({ ok: true, version: 'v11' });
+      return jsonResponse_({ ok: true, version: 'v13' });
+    }
+
+    if (action === 'fetch_x_trends') {
+      var nowIso = new Date().toISOString();
+      var nowMs = new Date().getTime();
+      var threeDaysMs = 3 * 24 * 60 * 60 * 1000;
+      var xRequests = [
+        {
+          url: 'https://trends24.in/brazil/',
+          muteHttpExceptions: true,
+          followRedirects: true,
+          headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36' }
+        },
+        {
+          url: 'https://getdaytrends.com/brazil/',
+          muteHttpExceptions: true,
+          followRedirects: true,
+          headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36' }
+        },
+        {
+          url: 'https://news.google.com/rss/search?q=' + encodeURIComponent('(twitter OR "no X" OR "trending topics" OR viralizou OR "assuntos mais comentados") brasil when:3d') + '&hl=pt-BR&gl=BR&ceid=BR:pt',
+          muteHttpExceptions: true,
+          followRedirects: true,
+          headers: { 'User-Agent': 'Mozilla/5.0' }
+        }
+      ];
+
+      var xCollected = [];
+      var xErrors = [];
+      var xNeedsAuth = false;
+
+      try {
+        var xResponses = UrlFetchApp.fetchAll(xRequests);
+        if (xResponses[0] && xResponses[0].getResponseCode() >= 200 && xResponses[0].getResponseCode() < 300) {
+          xCollected = xCollected.concat(parseTrends24HtmlGAS_(xResponses[0].getContentText('UTF-8'), nowIso));
+        } else {
+          xErrors.push('Trends24 HTTP ' + (xResponses[0] ? xResponses[0].getResponseCode() : 'err'));
+        }
+        if (xResponses[1] && xResponses[1].getResponseCode() >= 200 && xResponses[1].getResponseCode() < 300) {
+          xCollected = xCollected.concat(parseGetDayTrendsHtmlGAS_(xResponses[1].getContentText('UTF-8'), nowIso));
+        } else {
+          xErrors.push('GetDayTrends HTTP ' + (xResponses[1] ? xResponses[1].getResponseCode() : 'err'));
+        }
+        if (xResponses[2] && xResponses[2].getResponseCode() >= 200 && xResponses[2].getResponseCode() < 300) {
+          var rssX = parseRssXmlGAS_(xResponses[2].getContentText('UTF-8'), 'X Brasil (3 dias)', 'x_brasil', 25);
+          rssX.forEach(function (it) {
+            it.sourceName = 'X / ' + (it.sourceName || 'Notícias');
+            xCollected.push(it);
+          });
+        }
+      } catch (xErr) {
+        var xMsg = String(xErr && xErr.message ? xErr.message : xErr);
+        xErrors.push(xMsg);
+        if (/permiss|external_request|autoriz|auth/i.test(xMsg)) {
+          xNeedsAuth = true;
+        }
+      }
+
+      // Mescla com arquivo deslizante de 72h no Drive (se Drive estiver acessível)
+      try {
+        var xRoot = getRootFolder_();
+        var prevCache = readJsonFileFromFolder_(xRoot, X_TRENDS_CACHE_FILE_NAME);
+        var prevItems = (prevCache && Array.isArray(prevCache.items)) ? prevCache.items : [];
+        var mergedMap = {};
+        var addTrendItem = function (it) {
+          if (!it || !it.title) return;
+          var ts = it.pubDate ? Date.parse(it.pubDate) : nowMs;
+          if (!isNaN(ts) && (nowMs - ts) > threeDaysMs) return;
+          var key = String(it.title).toLowerCase().trim();
+          if (!mergedMap[key]) {
+            mergedMap[key] = it;
+          }
+        };
+        xCollected.forEach(addTrendItem);
+        prevItems.forEach(addTrendItem);
+        xCollected = Object.keys(mergedMap).map(function (k) { return mergedMap[k]; }).slice(0, 60);
+        if (xCollected.length) {
+          writeJsonFileToFolder_(xRoot, X_TRENDS_CACHE_FILE_NAME, { updatedAt: nowIso, items: xCollected });
+        }
+      } catch (cacheErr) {
+        // Ignora erro de cache no Drive para não bloquear resposta dos trends
+      }
+
+      return jsonResponse_({
+        ok: xCollected.length > 0,
+        version: 'v13',
+        items: xCollected.slice(0, 60),
+        errors: xErrors,
+        needsAuth: xNeedsAuth,
+        fetchedAt: nowIso
+      });
     }
 
     if (action === 'fetch_article') {
@@ -311,7 +520,7 @@ function doPost(e) {
 
       return jsonResponse_({
         ok: collected.length > 0,
-        version: 'v9',
+        version: 'v13',
         items: collected,
         errors: errors,
         needsAuth: needsAuth,
@@ -320,6 +529,22 @@ function doPost(e) {
     }
 
     var root = getRootFolder_();
+
+    if (action === 'list_profile_history') {
+      var histFile = readJsonFileFromFolder_(root, PROFILE_HISTORY_FILE_NAME);
+      var histItems = Array.isArray(histFile) ? histFile : (histFile && Array.isArray(histFile.items) ? histFile.items : []);
+      if (!histItems.length) {
+        var backupObj = readJsonFileFromFolder_(root, BACKUP_FILE_NAME);
+        if (backupObj && Array.isArray(backupObj.profileHistory)) {
+          histItems = backupObj.profileHistory;
+        }
+      }
+      return jsonResponse_({
+        ok: true,
+        version: 'v13',
+        items: histItems
+      });
+    }
 
     if (action === 'load') {
       var loadFiles = root.getFilesByName(BACKUP_FILE_NAME);
@@ -346,12 +571,35 @@ function doPost(e) {
         root.createFile(BACKUP_FILE_NAME, jsonStr, MimeType.PLAIN_TEXT);
       }
 
-      // 2. Organiza pastas legíveis por Criador -> Série -> Episódios (.txt + .png)
+      // 2. Mescla e salva histórico de versões de perfis automaticamente no Drive
+      var existingHistoryObj = readJsonFileFromFolder_(root, PROFILE_HISTORY_FILE_NAME);
+      var existingHistory = Array.isArray(existingHistoryObj)
+        ? existingHistoryObj
+        : (existingHistoryObj && Array.isArray(existingHistoryObj.items) ? existingHistoryObj.items : []);
+      var mergedHistory = mergeProfileHistoryGAS_(existingHistory, state.profileHistory || []);
+      if (mergedHistory.length) {
+        writeJsonFileToFolder_(root, PROFILE_HISTORY_FILE_NAME, {
+          updatedAt: new Date().toISOString(),
+          items: mergedHistory
+        });
+      }
+
+      // 3. Organiza pastas legíveis por Criador -> Série (mesmo vazias!) -> Episódios (.txt + .png)
       if (payload.exportReadableFiles !== false && Array.isArray(state.creators)) {
         var creatorsMap = {};
-        state.creators.forEach(function (c) { creatorsMap[c.id] = c; });
+        var creatorFoldersMap = {};
+        state.creators.forEach(function (c) {
+          creatorsMap[c.id] = c;
+          creatorFoldersMap[c.id] = getOrCreateFolder_(root, c.name || 'Criador');
+        });
         var seriesMap = {};
-        (state.series || []).forEach(function (s) { seriesMap[s.id] = s; });
+        (state.series || []).forEach(function (s) {
+          seriesMap[s.id] = s;
+          var cFolder = creatorFoldersMap[s.creatorId];
+          if (cFolder) {
+            getOrCreateFolder_(cFolder, s.name || 'Serie');
+          }
+        });
 
         (state.episodes || []).forEach(function (ep) {
           var creator = creatorsMap[ep.creatorId];
@@ -415,9 +663,13 @@ function doPost(e) {
 
       return jsonResponse_({
         ok: true,
+        version: 'v13',
         syncedAt: new Date().toISOString(),
         folderName: root.getName(),
-        folderUrl: root.getUrl()
+        folderUrl: root.getUrl(),
+        seriesCount: (state.series || []).length,
+        episodesCount: (state.episodes || []).length,
+        profileHistoryCount: mergedHistory.length
       });
     }
 

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'reels-lab-v12';
+const CACHE_NAME = 'reels-lab-v13';
 const ASSETS = [
   './',
   './index.html',

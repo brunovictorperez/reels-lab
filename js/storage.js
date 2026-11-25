@@ -27,6 +27,7 @@ export function createDefaultState() {
       geminiModel: 'gemini-4-hydrogen',
       theme: 'light',
       driveWebhookUrl: '',
+      driveAutoSync: true,
       lastDriveSync: null,
       driveFolderUrl: ''
     },
@@ -130,7 +131,8 @@ Porque você pode ter certeza: emagrecer não é passar fome de dia para pagar a
         dom: { seriesId: '', episodeId: '', timeSlot: '18h00 – 19h30', note: 'Pausa estratégica / Gravar lote da semana' }
       }
     },
-    hotTopicsCache: {}
+    hotTopicsCache: {},
+    profileHistory: []
   };
 }
 
@@ -193,6 +195,7 @@ function mergeDefaults(loaded) {
   if (mergedSettings.theme !== 'light' && mergedSettings.theme !== 'dark') {
     mergedSettings.theme = 'light';
   }
+  mergedSettings.driveAutoSync = loaded.settings?.driveAutoSync !== false;
 
   const creators = Array.isArray(loaded.creators) && loaded.creators.length ? loaded.creators : def.creators;
   // Migrate global Drive URL onto the first profile once so secondary profiles stay isolated
@@ -214,8 +217,26 @@ function mergeDefaults(loaded) {
     series: Array.isArray(loaded.series) ? loaded.series : def.series,
     episodes: Array.isArray(loaded.episodes) ? loaded.episodes : def.episodes,
     schedule: loaded.schedule || def.schedule,
-    hotTopicsCache: loaded.hotTopicsCache || {}
+    hotTopicsCache: loaded.hotTopicsCache || {},
+    profileHistory: Array.isArray(loaded.profileHistory) ? loaded.profileHistory : []
   };
+}
+
+export function mergeProfileHistoryLists(localList = [], remoteList = [], maxItems = 80) {
+  const byKey = new Map();
+  const pushEntry = (entry) => {
+    if (!entry || !entry.snapshot) return;
+    const key = entry.id || `${entry.creatorId || 'creator'}::${entry.savedAt || ''}`;
+    const existing = byKey.get(key);
+    if (!existing || new Date(entry.savedAt || 0) >= new Date(existing.savedAt || 0)) {
+      byKey.set(key, entry);
+    }
+  };
+  (Array.isArray(localList) ? localList : []).forEach(pushEntry);
+  (Array.isArray(remoteList) ? remoteList : []).forEach(pushEntry);
+  return Array.from(byKey.values())
+    .sort((a, b) => new Date(b.savedAt || 0) - new Date(a.savedAt || 0))
+    .slice(0, maxItems);
 }
 
 export function getEffectiveDriveWebhook(state, creator) {
@@ -241,7 +262,8 @@ export function buildFilteredDriveState(state, creatorId, onlyActive = true) {
     series: (state.series || []).filter((s) => s.creatorId === creatorId),
     episodes: (state.episodes || []).filter((e) => e.creatorId === creatorId),
     schedule: state.schedule?.[creatorId] ? { [creatorId]: state.schedule[creatorId] } : {},
-    hotTopicsCache: state.hotTopicsCache?.[creatorId] ? { [creatorId]: state.hotTopicsCache[creatorId] } : {}
+    hotTopicsCache: state.hotTopicsCache?.[creatorId] ? { [creatorId]: state.hotTopicsCache[creatorId] } : {},
+    profileHistory: (state.profileHistory || []).filter((h) => h.creatorId === creatorId || h.snapshot?.id === creatorId)
   };
 }
 
@@ -249,6 +271,11 @@ export function mergeDriveBackupState(currentState, loadedState, activeCreatorId
   if (!loadedState || !Array.isArray(loadedState.creators) || !loadedState.creators.length) {
     return currentState;
   }
+
+  const mergedHistory = mergeProfileHistoryLists(
+    currentState.profileHistory || [],
+    loadedState.profileHistory || []
+  );
 
   // Single-profile restore keeps other local profiles intact
   if (onlyActive && loadedState.creators.length === 1 && (currentState.creators || []).length > 1) {
@@ -286,11 +313,15 @@ export function mergeDriveBackupState(currentState, loadedState, activeCreatorId
       series,
       episodes,
       schedule,
-      hotTopicsCache
+      hotTopicsCache,
+      profileHistory: mergedHistory
     });
   }
 
-  return mergeDefaults(loadedState);
+  return mergeDefaults({
+    ...loadedState,
+    profileHistory: mergedHistory
+  });
 }
 
 const CREATOR_FIELD_MAP = { pain: 'pains', desire: 'desires', objection: 'objections' };
@@ -427,4 +458,31 @@ export async function loadFromGoogleDrive(webhookUrl) {
     throw new Error(json.error || 'Falha ao carregar do Google Drive.');
   }
   return json;
+}
+
+export async function fetchDriveProfileHistory(webhookUrl) {
+  if (!webhookUrl || !webhookUrl.startsWith('http')) {
+    throw new Error('URL do Web App do Google Apps Script inválida.');
+  }
+
+  const res = await fetch(webhookUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({ action: 'list_profile_history' })
+  });
+
+  const text = await res.text();
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    throw new Error('O Google Drive respondeu em formato inesperado ao buscar o histórico de perfis.');
+  }
+  if (!json.ok) {
+    throw new Error(json.error || 'Falha ao carregar histórico de perfis do Google Drive.');
+  }
+  return {
+    ok: true,
+    items: Array.isArray(json.items) ? json.items : []
+  };
 }
