@@ -1027,202 +1027,7 @@ function throwDetailedRadarError({ rawCount = 0, dateFilter = 'any', appsScriptD
   if (appsScriptDiag === 'outdated_deployment') {
     throw new Error('Seu Google Apps Script ainda está executando a versão antiga: abra script.google.com, cole o novo google-apps-script.gs v9, execute "autorizarGoogleNoticias" 1x e publique em Implantar → Gerenciar implantações → Editar → Nova versão.');
   }
-  throw new Error(`Não foi possível acessar as notícias reais do Google Notícias nesta rede agora (${appsScriptDetail || 'proxies RSS públicos indisponíveis'}). Atualize e autorize o Google Apps Script v13 ou tente novamente em instantes.`);
-}
-
-export function parseTrends24BrazilHtml(html = '', nowIso = new Date().toISOString()) {
-  const out = [];
-  if (!html) return out;
-  const seen = new Set();
-  const ignoreRe = /^(trends24|brazil|brasil|worldwide|home|login|signup|about|privacy|terms|twitter|trends|trending|search|all)$/i;
-  const olRegex = /<ol[^>]*>([\s\S]*?)<\/ol>/gi;
-  let olMatch;
-  while ((olMatch = olRegex.exec(html)) !== null && out.length < 35) {
-    const olHtml = olMatch[1];
-    const liRegex = /<li[^>]*>([\s\S]*?)<\/li>/gi;
-    let liMatch;
-    while ((liMatch = liRegex.exec(olHtml)) !== null && out.length < 35) {
-      const liBody = liMatch[1];
-      const aMatch = liBody.match(/<a[^>]*>([\s\S]*?)<\/a>/i);
-      const rawTitle = aMatch ? decodeXmlEntities(aMatch[1]) : '';
-      if (!rawTitle || rawTitle.length < 2 || rawTitle.length > 90 || ignoreRe.test(rawTitle)) continue;
-      const countMatch = liBody.match(/class=["'][^"']*(?:tweet-count|count|volume)[^"']*["'][^>]*>([\s\S]*?)<\/span>/i);
-      const volume = countMatch ? decodeXmlEntities(countMatch[1]) : '';
-      const normKey = rawTitle.toLowerCase();
-      if (seen.has(normKey)) continue;
-      seen.add(normKey);
-      out.push({
-        title: rawTitle,
-        topicTag: rawTitle,
-        link: `https://x.com/search?q=${encodeURIComponent(rawTitle)}&src=trend_click`,
-        pubDate: nowIso,
-        publishedAt: formatTrendDate(nowIso),
-        sourceName: 'Trends24 · X Brasil',
-        volume,
-        summary: volume ? `Volume reportado no X: ${volume}` : 'Assunto em alta nos Trending Topics do X Brasil.',
-        channel: 'X Brasil (3 dias)',
-        categoryId: 'x_brasil',
-        categoryLabel: '𝕏 Brasil (3 dias)'
-      });
-    }
-  }
-  return out;
-}
-
-export function parseGetDayTrendsBrazilHtml(html = '', nowIso = new Date().toISOString()) {
-  const out = [];
-  if (!html) return out;
-  const seen = new Set();
-  const linkRegex = /<a[^>]+href=["'][^"']*\/brazil\/trend\/[^"']*["'][^>]*>([\s\S]*?)<\/a>/gi;
-  let match;
-  while ((match = linkRegex.exec(html)) !== null && out.length < 30) {
-    const cleanTitle = decodeXmlEntities(match[1]);
-    if (!cleanTitle || cleanTitle.length < 2 || cleanTitle.length > 90) continue;
-    const normKey = cleanTitle.toLowerCase();
-    if (seen.has(normKey)) continue;
-    seen.add(normKey);
-    out.push({
-      title: cleanTitle,
-      topicTag: cleanTitle,
-      link: `https://x.com/search?q=${encodeURIComponent(cleanTitle)}&src=trend_click`,
-      pubDate: nowIso,
-      publishedAt: formatTrendDate(nowIso),
-      sourceName: 'GetDayTrends · X Brasil',
-      volume: '',
-      summary: 'Trending Topic capturado no ranking Brasil do X.',
-      channel: 'X Brasil (3 dias)',
-      categoryId: 'x_brasil',
-      categoryLabel: '𝕏 Brasil (3 dias)'
-    });
-  }
-  return out;
-}
-
-async function fetchHtmlViaPublicRelays(targetUrl) {
-  const encoded = encodeURIComponent(targetUrl);
-  return raceFirstNonEmpty([
-    (async () => {
-      const res = await fetchWithTimeout(`https://api.allorigins.win/get?url=${encoded}`, { method: 'GET' }, 8000);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      if (!data?.contents) throw new Error('empty');
-      return data.contents;
-    })(),
-    (async () => {
-      const res = await fetchWithTimeout(`https://api.codetabs.com/v1/proxy?quest=${encoded}`, { method: 'GET' }, 8000);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const txt = await res.text();
-      if (!txt) throw new Error('empty');
-      return txt;
-    })(),
-    (async () => {
-      const res = await fetchWithTimeout(`https://api.allorigins.win/raw?url=${encoded}`, { method: 'GET' }, 8000);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const txt = await res.text();
-      if (!txt) throw new Error('empty');
-      return txt;
-    })()
-  ]);
-}
-
-export async function fetchXBrazilTrends3Days({ driveWebhookUrl = '', onStatus = null } = {}) {
-  if (typeof onStatus === 'function') onStatus('Buscando Trending Topics do X Brasil (últimos 3 dias)...');
-
-  const nowMs = Date.now();
-  const nowIso = new Date(nowMs).toISOString();
-  const threeDaysMs = 3 * 24 * 60 * 60 * 1000;
-  let rawItems = [];
-  let fetchedFrom = 'X Brasil · Relays Públicos (3 dias)';
-  let appsScriptDiag = driveWebhookUrl ? 'pending' : 'no_url';
-
-  if (driveWebhookUrl) {
-    try {
-      const res = await fetchWithTimeout(driveWebhookUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify({ action: 'fetch_x_trends' })
-      }, 15000);
-      if (res.ok) {
-        const data = await res.json();
-        if (data?.ok && Array.isArray(data.items) && data.items.length) {
-          rawItems = data.items;
-          fetchedFrom = 'Google Apps Script · X Brasil (3 dias)';
-          appsScriptDiag = 'ok';
-        } else if (data?.needsAuth) {
-          appsScriptDiag = 'needs_auth';
-        } else if (!data?.version) {
-          appsScriptDiag = 'outdated_deployment';
-        }
-      }
-    } catch {
-      appsScriptDiag = 'script_unreachable';
-    }
-  }
-
-  if (!rawItems.length) {
-    const xRssFeed = {
-      label: 'X Brasil (3 dias)',
-      categoryId: 'x_brasil',
-      url: `https://news.google.com/rss/search?q=${encodeURIComponent('(twitter OR "no X" OR "trending topics" OR viralizou OR "assuntos mais comentados") brasil when:3d')}&hl=pt-BR&gl=BR&ceid=BR:pt`
-    };
-    const [t24Res, gdtRes, rssRes] = await Promise.allSettled([
-      fetchHtmlViaPublicRelays('https://trends24.in/brazil/').then((html) => parseTrends24BrazilHtml(html, nowIso)),
-      fetchHtmlViaPublicRelays('https://getdaytrends.com/brazil/').then((html) => parseGetDayTrendsBrazilHtml(html, nowIso)),
-      fetchSingleRssFeed(xRssFeed, 25).then((items) =>
-        items.map((it) => ({
-          ...it,
-          topicTag: it.title,
-          sourceName: `X / ${it.sourceName || 'Notícias'}`,
-          channel: 'X Brasil (3 dias)',
-          categoryId: 'x_brasil',
-          categoryLabel: '𝕏 Brasil (3 dias)'
-        }))
-      )
-    ]);
-
-    if (t24Res.status === 'fulfilled' && Array.isArray(t24Res.value)) rawItems.push(...t24Res.value);
-    if (gdtRes.status === 'fulfilled' && Array.isArray(gdtRes.value)) rawItems.push(...gdtRes.value);
-    if (rssRes.status === 'fulfilled' && Array.isArray(rssRes.value)) rawItems.push(...rssRes.value);
-  }
-
-  const deduped = [];
-  const seenTitles = new Set();
-  for (const item of rawItems) {
-    const cleanTitle = String(item?.title || '').trim();
-    if (!cleanTitle) continue;
-    const ts = item.pubDate ? Date.parse(item.pubDate) : nowMs;
-    if (!Number.isNaN(ts) && (nowMs - ts) > threeDaysMs) continue;
-    const normKey = cleanTitle.toLowerCase();
-    if (seenTitles.has(normKey)) continue;
-    seenTitles.add(normKey);
-    deduped.push({
-      ...item,
-      title: cleanTitle,
-      topicTag: item.topicTag || cleanTitle,
-      link: item.link || `https://x.com/search?q=${encodeURIComponent(cleanTitle)}&src=trend_click`,
-      pubDate: item.pubDate || nowIso,
-      publishedAt: item.publishedAt || formatTrendDate(item.pubDate || nowIso),
-      sourceName: item.sourceName || 'X Brasil',
-      channel: 'X Brasil (3 dias)',
-      categoryId: 'x_brasil',
-      categoryLabel: '𝕏 Brasil (3 dias)'
-    });
-  }
-
-  const items = deduped.slice(0, 45);
-  if (!items.length) {
-    if (appsScriptDiag === 'needs_auth') {
-      throw new Error('Autorize o Google Apps Script (execute "autorizarGoogleNoticias" 1x em script.google.com) ou tente novamente em instantes.');
-    }
-    throw new Error('Não foi possível carregar os Trending Topics do X Brasil no momento. Verifique sua conexão ou atualize o Google Apps Script para v13.');
-  }
-
-  return {
-    items,
-    fetchedFrom,
-    appsScriptDiag,
-    fetchedAt: nowIso
-  };
+  throw new Error(`Não foi possível acessar as notícias reais do Google Notícias nesta rede agora (${appsScriptDetail || 'proxies RSS públicos indisponíveis'}). Atualize e autorize o Google Apps Script v9 ou tente novamente em instantes.`);
 }
 
 export async function fetchGoogleNewsPortal({ categoryId = 'brasil', subCategoryId = 'todas', focusQuery = '', dateFilter = 'any', driveWebhookUrl = '', onStatus = null } = {}) {
@@ -1412,12 +1217,12 @@ export function detectBestSeriesModelId({ title = '', funnel = '', suggestedMode
   return 'codigo_viral';
 }
 
-export async function generateAnglesFromSelectedNews({ creator, articles = [], focusQuery = '', count = 5, apiKey, modelName = 'gemini-4-hydrogen', onStatus = null, sourceLabel = 'GOOGLE NOTÍCIAS BRASIL (https://news.google.com/)' }) {
+export async function generateAnglesFromSelectedNews({ creator, articles = [], focusQuery = '', count = 5, apiKey, modelName = 'gemini-4-hydrogen', onStatus = null }) {
   if (!apiKey) {
     throw new Error('Configure sua Gemini API Key antes de gerar roteiros.');
   }
   if (!Array.isArray(articles) || !articles.length) {
-    throw new Error('Nenhuma notícia ou trend real foi fornecido para gerar conteúdos.');
+    throw new Error('Nenhuma notícia real do Google News foi fornecida para gerar conteúdos.');
   }
 
   const feedSlice = articles.slice(0, 24);
@@ -1429,7 +1234,7 @@ export async function generateAnglesFromSelectedNews({ creator, articles = [], f
   ).join('\n');
 
   const prompt = `Hoje é ${today}.
-Abaixo estão ${feedSlice.length} ASSUNTOS / NOTÍCIAS REAIS COLETADOS AGORA (${sourceLabel}):
+Abaixo estão ${feedSlice.length} NOTÍCIAS REAIS COLETADAS AGORA DO GOOGLE NOTÍCIAS BRASIL (https://news.google.com/):
 
 ${formattedFeed}
 
@@ -1514,6 +1319,352 @@ Responda APENAS com JSON válido no formato:
 
   const usedArticleLinks = groundedTopics.map((t) => t.sourceUrl).filter(Boolean);
   return { topics: groundedTopics, modelUsed, usedArticleLinks };
+}
+
+export const X_TREND_DAY_FILTERS = [
+  { id: 'all', label: 'Todos (3 dias)' },
+  { id: 'hoje', label: 'Hoje' },
+  { id: 'ontem', label: 'Ontem' },
+  { id: '2dias', label: 'Há 2 dias' }
+];
+
+export function getBrazilRecentDays(nowMs = Date.now()) {
+  const offsets = [
+    { offset: 0, dayKey: 'hoje', prefix: 'Hoje' },
+    { offset: -1, dayKey: 'ontem', prefix: 'Ontem' },
+    { offset: -2, dayKey: '2dias', prefix: 'Há 2 dias' }
+  ];
+  return offsets.map(({ offset, dayKey, prefix }) => {
+    const dt = new Date(nowMs - (3 * 60 * 60 * 1000) + (offset * 24 * 60 * 60 * 1000));
+    const y = dt.getUTCFullYear();
+    const m = String(dt.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(dt.getUTCDate()).padStart(2, '0');
+    return {
+      dayKey,
+      iso: `${y}-${m}-${d}`,
+      br: `${d}/${m}`,
+      dayLabel: `${prefix} (${d}/${m})`
+    };
+  });
+}
+
+export function parseXTrendsHtml(html, { dayKey = 'hoje', dayLabel = 'Hoje', dateIso = '', sourceHint = 'X Brasil' } = {}) {
+  const src = String(html || '');
+  if (!src.trim()) return [];
+  const items = [];
+  const seen = new Set();
+
+  const addTopic = (rawTopic, rawVol = '', rawHref = '') => {
+    const topic = decodeXmlEntities(rawTopic);
+    if (!topic || topic.length < 2 || topic.length > 80) return;
+    if (/^(brazil|brasil|worldwide|trends24|getdaytrends|login|about|privacy|home|more|view all|sign in)$/i.test(topic)) return;
+    const key = topic.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    const vol = decodeXmlEntities(rawVol).replace(/\s+/g, ' ').trim();
+    const xSearchUrl = `https://x.com/search?q=${encodeURIComponent(topic)}&src=trend_click&vertical=trends`;
+    items.push({
+      id: `${dayKey}::${key}`,
+      rank: items.length + 1,
+      topic,
+      volume: vol,
+      dayKey,
+      dayLabel,
+      dateIso,
+      publishedAt: dayLabel,
+      sourceName: sourceHint,
+      xSearchUrl,
+      sourceUrl: rawHref || xSearchUrl
+    });
+  };
+
+  // GetDayTrends table rows
+  const trRegex = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi;
+  let trMatch;
+  while ((trMatch = trRegex.exec(src)) !== null && items.length < 25) {
+    const row = trMatch[1];
+    const linkMatch = row.match(/<a\b[^>]*href=["']([^"']*\/trend\/[^"']*)["'][^>]*>([\s\S]*?)<\/a>/i);
+    if (linkMatch) {
+      const href = linkMatch[1].startsWith('http') ? linkMatch[1] : `https://getdaytrends.com${linkMatch[1]}`;
+      const volMatch = row.match(/<span\b[^>]*class=["'][^"']*(?:small|desc|count)[^"']*["'][^>]*>([\s\S]*?)<\/span>/i)
+        || row.match(/(\d[\d.,]*\s*[KkMm]?\s*(?:tweets?|posts?)?)\s*<\/td>/i);
+      addTopic(linkMatch[2], volMatch ? volMatch[1] : '', href);
+    }
+  }
+
+  // Trends24 ordered list items
+  if (!items.length) {
+    const liRegex = /<li\b[^>]*>([\s\S]*?)<\/li>/gi;
+    let liMatch;
+    while ((liMatch = liRegex.exec(src)) !== null && items.length < 25) {
+      const liBlock = liMatch[1];
+      if (!/trend-link|twitter\.com\/search|x\.com\/search/i.test(liBlock)) continue;
+      const aMatch = liBlock.match(/<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/i);
+      if (aMatch) {
+        const countMatch = liBlock.match(/<span\b[^>]*class=["'][^"']*tweet-count[^"']*["'][^>]*>([\s\S]*?)<\/span>/i);
+        addTopic(aMatch[2], countMatch ? countMatch[1] : '', aMatch[1]);
+      }
+    }
+  }
+
+  return items;
+}
+
+async function fetchHtmlViaCorsRelay(targetUrl) {
+  const encoded = encodeURIComponent(targetUrl);
+  const tryAllOrigins = async () => {
+    const res = await fetchWithTimeout(`https://api.allorigins.win/get?url=${encoded}`, { method: 'GET' }, 8000);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (!data?.contents) throw new Error('empty');
+    return data.contents;
+  };
+  const tryRelay = async (proxyUrl) => {
+    const res = await fetchWithTimeout(proxyUrl, { method: 'GET' }, 8000);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const txt = await res.text();
+    if (!txt || txt.length < 200) throw new Error('empty');
+    return txt;
+  };
+  return raceFirstNonEmpty([
+    tryAllOrigins(),
+    tryRelay(`https://api.codetabs.com/v1/proxy?quest=${encoded}`),
+    tryRelay(`https://api.allorigins.win/raw?url=${encoded}`)
+  ]);
+}
+
+export async function fetchBrazilXTrends({ driveWebhookUrl = '', onStatus = null } = {}) {
+  const days = getBrazilRecentDays();
+  if (typeof onStatus === 'function') {
+    onStatus('Buscando Trending Topics do X (Brasil · 3 dias)...');
+  }
+
+  let appsScriptDiag = 'no_url';
+  if (driveWebhookUrl) {
+    try {
+      const res = await fetchWithTimeout(driveWebhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ action: 'fetch_x_trends' })
+      }, 16000);
+      if (res.ok) {
+        const data = await res.json();
+        const errText = [data?.error, ...(Array.isArray(data?.errors) ? data.errors : [])].filter(Boolean).join(' | ');
+        if (data?.needsAuth || /permiss|external_request|UrlFetchApp|autoriz|auth/i.test(errText)) {
+          appsScriptDiag = 'needs_auth';
+        } else if (/ação desconhecida|unknown action/i.test(errText)) {
+          appsScriptDiag = 'outdated_deployment';
+        } else if (data?.ok && Array.isArray(data.items) && data.items.length) {
+          return {
+            items: data.items,
+            days: Array.isArray(data.days) && data.days.length ? data.days : days,
+            fetchedFrom: 'Google Apps Script (X Brasil ao vivo)',
+            fetchedAt: data.fetchedAt || new Date().toISOString()
+          };
+        }
+      }
+    } catch {
+      appsScriptDiag = 'script_unreachable';
+    }
+  }
+
+  // Fallback via proxies CORS no navegador
+  const byDay = { hoje: [], ontem: [], '2dias': [] };
+  const daySeen = { hoje: new Set(), ontem: new Set(), '2dias': new Set() };
+  const pushItems = (dayKey, list) => {
+    for (const item of list || []) {
+      const key = String(item.topic || '').toLowerCase().trim();
+      if (!key || daySeen[dayKey].has(key) || byDay[dayKey].length >= 25) continue;
+      daySeen[dayKey].add(key);
+      byDay[dayKey].push({
+        ...item,
+        rank: byDay[dayKey].length + 1
+      });
+    }
+  };
+
+  const scrapeSpecs = [
+    { day: days[0], sourceHint: 'X / GetDayTrends', url: 'https://getdaytrends.com/brazil/' },
+    { day: days[0], sourceHint: 'X / Trends24', url: 'https://trends24.in/brazil/' },
+    { day: days[1], sourceHint: 'X / GetDayTrends', url: `https://getdaytrends.com/brazil/${days[1].iso}/20/` },
+    { day: days[2], sourceHint: 'X / GetDayTrends', url: `https://getdaytrends.com/brazil/${days[2].iso}/20/` }
+  ];
+
+  const scraped = await Promise.allSettled(
+    scrapeSpecs.map(async (spec) => {
+      const html = await fetchHtmlViaCorsRelay(spec.url);
+      return {
+        dayKey: spec.day.dayKey,
+        items: parseXTrendsHtml(html, {
+          dayKey: spec.day.dayKey,
+          dayLabel: spec.day.dayLabel,
+          dateIso: spec.day.iso,
+          sourceHint: spec.sourceHint
+        })
+      };
+    })
+  );
+
+  scraped.forEach((res) => {
+    if (res.status === 'fulfilled' && res.value?.items?.length) {
+      pushItems(res.value.dayKey, res.value.items);
+    }
+  });
+
+  // Fallback real via Google News Brasil para repercussões do X nos dias sem resposta de scraper
+  const missingDays = days.filter((d) => !byDay[d.dayKey].length);
+  if (missingDays.length) {
+    try {
+      const rssFeed = {
+        label: 'Repercussão no X Brasil',
+        categoryId: 'x',
+        url: `https://news.google.com/rss/search?q=${encodeURIComponent('("no X" OR "no Twitter" OR "trending topics" OR viralizou) Brasil when:3d')}&hl=pt-BR&gl=BR&ceid=BR:pt`
+      };
+      const rssItems = await fetchSingleRssFeed(rssFeed, 30);
+      for (const it of rssItems) {
+        const dt = it.pubDate ? new Date(it.pubDate) : null;
+        let dayObj = days[0];
+        if (dt && !Number.isNaN(dt.getTime())) {
+          const brIso = new Date(dt.getTime() - (3 * 60 * 60 * 1000)).toISOString().slice(0, 10);
+          const matchedDay = days.find((d) => d.iso === brIso);
+          if (matchedDay) dayObj = matchedDay;
+        }
+        if (byDay[dayObj.dayKey].length < 15) {
+          pushItems(dayObj.dayKey, [{
+            id: `${dayObj.dayKey}::rss::${it.title.toLowerCase().slice(0, 40)}`,
+            rank: 1,
+            topic: it.title,
+            volume: it.sourceName || '',
+            dayKey: dayObj.dayKey,
+            dayLabel: dayObj.dayLabel,
+            dateIso: dayObj.iso,
+            publishedAt: dayObj.dayLabel,
+            sourceName: `Repercussão no X · ${it.sourceName || 'Google Notícias'}`,
+            xSearchUrl: `https://x.com/search?q=${encodeURIComponent(it.title.slice(0, 60))}&src=trend_click&vertical=trends`,
+            sourceUrl: it.link || ''
+          }]);
+        }
+      }
+    } catch {
+      // Ignora erro de fallback secundário
+    }
+  }
+
+  const allItems = [...byDay.hoje, ...byDay.ontem, ...byDay['2dias']];
+  if (!allItems.length) {
+    if (appsScriptDiag === 'outdated_deployment') {
+      throw new Error('Atualize seu google-apps-script.gs para a versão v13 e publique "Nova versão" para buscar os Trending Topics do X direto pelos servidores do Google.');
+    }
+    throw new Error('Não foi possível acessar os Trending Topics do X Brasil nesta rede agora. Conecte ou atualize o Google Apps Script v13 no botão Drive Ativo e tente novamente.');
+  }
+
+  const hasDirectScrapers = allItems.some((it) => String(it.sourceName || '').startsWith('X /'));
+  return {
+    items: allItems,
+    days,
+    fetchedFrom: hasDirectScrapers ? 'X Brasil (Agregadores ao vivo)' : 'X Brasil (Repercussão em tempo real)',
+    fetchedAt: new Date().toISOString()
+  };
+}
+
+export async function generateAnglesFromXTrends({ creator, trends = [], apiKey, modelName = 'gemini-4-hydrogen', onStatus = null }) {
+  if (!apiKey) {
+    throw new Error('Configure sua Gemini API Key antes de gerar roteiros a partir do X.');
+  }
+  if (!Array.isArray(trends) || !trends.length) {
+    throw new Error('Selecione pelo menos 1 assunto do X Trending Topics.');
+  }
+
+  const slice = trends.slice(0, 15);
+  const today = new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' });
+  const formattedTrends = slice.map((item, idx) =>
+    `[${idx + 1}] Assunto no X: "${item.topic}" | Período: ${item.dayLabel || item.publishedAt || 'Últimos 3 dias'}${item.volume ? ` | Volume: ${item.volume}` : ''} | Fonte: ${item.sourceName || 'X Brasil'}`
+  ).join('\n');
+
+  const prompt = `Hoje é ${today}.
+Abaixo estão ${slice.length} TRENDING TOPICS REAIS DO X (ANTIGO TWITTER) NO BRASIL DOS ÚLTIMOS 3 DIAS:
+
+${formattedTrends}
+
+CONTEXTO DO CRIADOR:
+${buildCreatorContext(creator)}
+
+REGRAS ESTRITAS:
+1. Baseie-se 100% NOS TRENDING TOPICS NUMERADOS ACIMA ([1] a [${slice.length}]). É PROIBIDO inventar trends fora da lista.
+2. Gere EXATAMENTE ${slice.length} card(s) de conteúdo (um para cada trend selecionado acima, sem repetir "sourceIndex").
+3. Em cada card, faça uma "bubbleBridge" conectando esse assunto viral do X à bolha e ao público do criador sem parecer página de fofoca, e crie 3 ângulos de Reels (Topo=Descoberta <30s, Meio=Conexão 30-45s, Fundo=Venda 45-60s).
+4. Escolha EXATAMENTE o "modelId" mais fiel ao estilo do título/ângulo criado:
+- "codigo_viral": assunto quente, debate, alerta, quebra de padrão, descoberta rápida (<30s).
+- "serie_01": formato "O que toda pessoa que [situação] deveria fazer, mas não faz".
+- "serie_02": formato "Comece a [ação prática imediata]...".
+- "serie_03": formato "A pessoa que [situação cotidiana]..." (identificação extrema).
+- "serie_04": formato "Como [resultado] sem [dificuldade comum]".
+- "serie_05": formato "Quem quer [desejo específico] deveria fazer isso aqui" (ótimo para fundo/venda).
+
+Responda APENAS com JSON válido no formato:
+{
+  "topics": [
+    {
+      "sourceIndex": 1,
+      "trendTitle": "Nome do trend do X [sourceIndex] conectado ao tema",
+      "timingWhy": "Por que esse assunto está em alta no X Brasil agora (1-2 frases)",
+      "bubbleBridge": "Ponte inteligente desse trend do X para o nicho do criador",
+      "angles": [
+        { "funnel": "topo", "modelId": "codigo_viral", "title": "Ideia de título/gancho para Descoberta (<30s)" },
+        { "funnel": "meio", "modelId": "serie_03", "title": "Ideia de episódio para Conexão (30-45s)" },
+        { "funnel": "fundo", "modelId": "serie_05", "title": "Ideia de episódio para Venda / Quebra de objeção" }
+      ]
+    }
+  ]
+}`;
+
+  const { text, modelUsed } = await callGemini({
+    apiKey,
+    modelName,
+    taskType: 'radar',
+    prompt,
+    useSearch: false,
+    expectJson: true,
+    onStatus
+  });
+
+  const parsed = cleanJsonResponse(text);
+  const rawTopics = Array.isArray(parsed?.topics) ? parsed.topics.slice(0, slice.length) : [];
+  const usedIndexes = new Set();
+
+  const groundedTopics = rawTopics.map((t, idx) => {
+    let refIdx = Number(t.sourceIndex);
+    if (!(refIdx >= 1 && refIdx <= slice.length) || usedIndexes.has(refIdx)) {
+      const nextUnused = slice.findIndex((_, i) => !usedIndexes.has(i + 1));
+      refIdx = nextUnused !== -1 ? nextUnused + 1 : ((idx % slice.length) + 1);
+    }
+    usedIndexes.add(refIdx);
+    const matched = slice[refIdx - 1];
+    const normalizedAngles = (t.angles || []).map((ang) => ({
+      ...ang,
+      modelId: detectBestSeriesModelId({
+        title: ang?.title || '',
+        funnel: ang?.funnel || '',
+        suggestedModelId: ang?.modelId || '',
+        bridge: t?.bubbleBridge || ''
+      })
+    }));
+    return {
+      ...t,
+      angles: normalizedAngles,
+      sourceIndex: refIdx,
+      sourceName: matched?.sourceName || 'X Brasil',
+      publishedAt: matched?.dayLabel || matched?.publishedAt || 'Últimos 3 dias',
+      sourceUrl: matched?.xSearchUrl || matched?.sourceUrl || '',
+      categoryLabel: `𝕏 Brasil · ${matched?.dayLabel || '3 dias'}`
+    };
+  });
+
+  return {
+    topics: groundedTopics,
+    modelUsed,
+    usedTrendIds: slice.map((t) => t.id).filter(Boolean)
+  };
 }
 
 export async function searchHotTopics({

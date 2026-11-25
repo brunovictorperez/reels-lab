@@ -27,7 +27,6 @@ export function createDefaultState() {
       geminiModel: 'gemini-4-hydrogen',
       theme: 'light',
       driveWebhookUrl: '',
-      driveAutoSync: true,
       lastDriveSync: null,
       driveFolderUrl: ''
     },
@@ -131,8 +130,7 @@ Porque você pode ter certeza: emagrecer não é passar fome de dia para pagar a
         dom: { seriesId: '', episodeId: '', timeSlot: '18h00 – 19h30', note: 'Pausa estratégica / Gravar lote da semana' }
       }
     },
-    hotTopicsCache: {},
-    profileHistory: []
+    hotTopicsCache: {}
   };
 }
 
@@ -195,7 +193,6 @@ function mergeDefaults(loaded) {
   if (mergedSettings.theme !== 'light' && mergedSettings.theme !== 'dark') {
     mergedSettings.theme = 'light';
   }
-  mergedSettings.driveAutoSync = loaded.settings?.driveAutoSync !== false;
 
   const creators = Array.isArray(loaded.creators) && loaded.creators.length ? loaded.creators : def.creators;
   // Migrate global Drive URL onto the first profile once so secondary profiles stay isolated
@@ -217,26 +214,8 @@ function mergeDefaults(loaded) {
     series: Array.isArray(loaded.series) ? loaded.series : def.series,
     episodes: Array.isArray(loaded.episodes) ? loaded.episodes : def.episodes,
     schedule: loaded.schedule || def.schedule,
-    hotTopicsCache: loaded.hotTopicsCache || {},
-    profileHistory: Array.isArray(loaded.profileHistory) ? loaded.profileHistory : []
+    hotTopicsCache: loaded.hotTopicsCache || {}
   };
-}
-
-export function mergeProfileHistoryLists(localList = [], remoteList = [], maxItems = 80) {
-  const byKey = new Map();
-  const pushEntry = (entry) => {
-    if (!entry || !entry.snapshot) return;
-    const key = entry.id || `${entry.creatorId || 'creator'}::${entry.savedAt || ''}`;
-    const existing = byKey.get(key);
-    if (!existing || new Date(entry.savedAt || 0) >= new Date(existing.savedAt || 0)) {
-      byKey.set(key, entry);
-    }
-  };
-  (Array.isArray(localList) ? localList : []).forEach(pushEntry);
-  (Array.isArray(remoteList) ? remoteList : []).forEach(pushEntry);
-  return Array.from(byKey.values())
-    .sort((a, b) => new Date(b.savedAt || 0) - new Date(a.savedAt || 0))
-    .slice(0, maxItems);
 }
 
 export function getEffectiveDriveWebhook(state, creator) {
@@ -262,8 +241,7 @@ export function buildFilteredDriveState(state, creatorId, onlyActive = true) {
     series: (state.series || []).filter((s) => s.creatorId === creatorId),
     episodes: (state.episodes || []).filter((e) => e.creatorId === creatorId),
     schedule: state.schedule?.[creatorId] ? { [creatorId]: state.schedule[creatorId] } : {},
-    hotTopicsCache: state.hotTopicsCache?.[creatorId] ? { [creatorId]: state.hotTopicsCache[creatorId] } : {},
-    profileHistory: (state.profileHistory || []).filter((h) => h.creatorId === creatorId || h.snapshot?.id === creatorId)
+    hotTopicsCache: state.hotTopicsCache?.[creatorId] ? { [creatorId]: state.hotTopicsCache[creatorId] } : {}
   };
 }
 
@@ -271,11 +249,6 @@ export function mergeDriveBackupState(currentState, loadedState, activeCreatorId
   if (!loadedState || !Array.isArray(loadedState.creators) || !loadedState.creators.length) {
     return currentState;
   }
-
-  const mergedHistory = mergeProfileHistoryLists(
-    currentState.profileHistory || [],
-    loadedState.profileHistory || []
-  );
 
   // Single-profile restore keeps other local profiles intact
   if (onlyActive && loadedState.creators.length === 1 && (currentState.creators || []).length > 1) {
@@ -313,15 +286,11 @@ export function mergeDriveBackupState(currentState, loadedState, activeCreatorId
       series,
       episodes,
       schedule,
-      hotTopicsCache,
-      profileHistory: mergedHistory
+      hotTopicsCache
     });
   }
 
-  return mergeDefaults({
-    ...loadedState,
-    profileHistory: mergedHistory
-  });
+  return mergeDefaults(loadedState);
 }
 
 const CREATOR_FIELD_MAP = { pain: 'pains', desire: 'desires', objection: 'objections' };
@@ -412,7 +381,92 @@ export function exportBackupJson(state) {
   URL.revokeObjectURL(url);
 }
 
-export async function syncToGoogleDrive(state, webhookUrl) {
+export function upsertImportedProfile(currentState, profileBundle, { driveWebhookUrl = '' } = {}) {
+  const incomingCreator = profileBundle?.creator;
+  if (!incomingCreator || !incomingCreator.id) {
+    throw new Error('Perfil recebido do Google Drive está incompleto ou inválido.');
+  }
+
+  const targetId = incomingCreator.id;
+  const restoredCreator = {
+    ...incomingCreator,
+    driveWebhookUrl: incomingCreator.driveWebhookUrl || driveWebhookUrl || ''
+  };
+
+  const creators = Array.isArray(currentState?.creators) ? [...currentState.creators] : [];
+  const existsIdx = creators.findIndex((c) => c.id === targetId);
+  if (existsIdx >= 0) {
+    creators[existsIdx] = restoredCreator;
+  } else {
+    creators.push(restoredCreator);
+  }
+
+  const incomingSeries = Array.isArray(profileBundle.series)
+    ? profileBundle.series.map((s) => ({ ...s, creatorId: targetId }))
+    : [];
+  const incomingEpisodes = Array.isArray(profileBundle.episodes)
+    ? profileBundle.episodes.map((ep) => ({ ...ep, creatorId: targetId }))
+    : [];
+
+  const series = [
+    ...(currentState?.series || []).filter((s) => s.creatorId !== targetId),
+    ...incomingSeries
+  ];
+  const episodes = [
+    ...(currentState?.episodes || []).filter((e) => e.creatorId !== targetId),
+    ...incomingEpisodes
+  ];
+
+  const schedule = { ...(currentState?.schedule || {}) };
+  if (profileBundle.schedule?.[targetId]) {
+    schedule[targetId] = profileBundle.schedule[targetId];
+  } else if (profileBundle.schedule && !Object.keys(profileBundle.schedule).length) {
+    delete schedule[targetId];
+  }
+
+  const hotTopicsCache = { ...(currentState?.hotTopicsCache || {}) };
+  if (profileBundle.hotTopicsCache?.[targetId]) {
+    hotTopicsCache[targetId] = profileBundle.hotTopicsCache[targetId];
+  }
+
+  return mergeDefaults({
+    ...(currentState || {}),
+    activeCreatorId: targetId,
+    creators,
+    series,
+    episodes,
+    schedule,
+    hotTopicsCache
+  });
+}
+
+export function removeCreatorFromState(currentState, creatorId) {
+  const existing = Array.isArray(currentState?.creators) ? currentState.creators : [];
+  if (!creatorId || existing.length <= 1 || !existing.some((c) => c.id === creatorId)) {
+    return currentState;
+  }
+  const remainingCreators = existing.filter((c) => c.id !== creatorId);
+  const schedule = { ...(currentState.schedule || {}) };
+  delete schedule[creatorId];
+  const hotTopicsCache = { ...(currentState.hotTopicsCache || {}) };
+  delete hotTopicsCache[creatorId];
+
+  const nextActiveId = currentState.activeCreatorId === creatorId
+    ? remainingCreators[0].id
+    : currentState.activeCreatorId;
+
+  return {
+    ...currentState,
+    activeCreatorId: nextActiveId,
+    creators: remainingCreators,
+    series: (currentState.series || []).filter((s) => s.creatorId !== creatorId),
+    episodes: (currentState.episodes || []).filter((e) => e.creatorId !== creatorId),
+    schedule,
+    hotTopicsCache
+  };
+}
+
+export async function syncToGoogleDrive(state, webhookUrl, options = {}) {
   if (!webhookUrl || !webhookUrl.startsWith('http')) {
     throw new Error('URL do Web App do Google Apps Script inválida.');
   }
@@ -423,6 +477,7 @@ export async function syncToGoogleDrive(state, webhookUrl) {
     body: JSON.stringify({
       action: 'sync',
       exportReadableFiles: true,
+      mergeProfiles: options.mergeProfiles !== false,
       state
     })
   });
@@ -460,29 +515,50 @@ export async function loadFromGoogleDrive(webhookUrl) {
   return json;
 }
 
-export async function fetchDriveProfileHistory(webhookUrl) {
+async function callDriveProfileAction(webhookUrl, payload) {
   if (!webhookUrl || !webhookUrl.startsWith('http')) {
     throw new Error('URL do Web App do Google Apps Script inválida.');
   }
-
   const res = await fetch(webhookUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    body: JSON.stringify({ action: 'list_profile_history' })
+    body: JSON.stringify(payload)
   });
-
   const text = await res.text();
   let json;
   try {
     json = JSON.parse(text);
   } catch {
-    throw new Error('O Google Drive respondeu em formato inesperado ao buscar o histórico de perfis.');
+    throw new Error('Resposta inesperada do Google Apps Script. Verifique se implantou como "Qualquer pessoa".');
   }
   if (!json.ok) {
-    throw new Error(json.error || 'Falha ao carregar histórico de perfis do Google Drive.');
+    if (/ação desconhecida|unknown action/i.test(json.error || '')) {
+      throw new Error('Atualize o arquivo google-apps-script.gs para a versão v13 e publique "Nova versão" no Apps Script.');
+    }
+    throw new Error(json.error || 'Erro ao comunicar com o Google Drive.');
   }
-  return {
-    ok: true,
-    items: Array.isArray(json.items) ? json.items : []
-  };
+  return json;
+}
+
+export async function listDriveProfiles(webhookUrl) {
+  const json = await callDriveProfileAction(webhookUrl, { action: 'list_profiles' });
+  if (!Array.isArray(json.profiles)) {
+    throw new Error('Seu Google Apps Script está desatualizado. Cole o novo google-apps-script.gs v13 e publique "Nova versão".');
+  }
+  return json.profiles;
+}
+
+export async function loadDriveProfile(webhookUrl, creatorId) {
+  if (!creatorId) throw new Error('ID do perfil não informado.');
+  return callDriveProfileAction(webhookUrl, { action: 'load_profile', creatorId });
+}
+
+export async function deleteDriveProfile(webhookUrl, { creatorId, creatorName = '', deleteReadableFolder = true } = {}) {
+  if (!creatorId) throw new Error('ID do perfil não informado.');
+  return callDriveProfileAction(webhookUrl, {
+    action: 'delete_profile',
+    creatorId,
+    creatorName,
+    deleteReadableFolder
+  });
 }

@@ -9,8 +9,11 @@ import {
   getEffectiveDriveWebhook,
   buildFilteredDriveState,
   mergeDriveBackupState,
-  fetchDriveProfileHistory,
-  mergeProfileHistoryLists,
+  upsertImportedProfile,
+  removeCreatorFromState,
+  listDriveProfiles,
+  loadDriveProfile,
+  deleteDriveProfile,
   parseCreatorFieldItems,
   addCreatorFieldItem,
   removeCreatorFieldItem
@@ -21,8 +24,10 @@ import {
   GOOGLE_NEWS_CATEGORIES,
   inferCreatorDefaultCategory,
   fetchGoogleNewsPortal,
-  fetchXBrazilTrends3Days,
   generateAnglesFromSelectedNews,
+  X_TREND_DAY_FILTERS,
+  fetchBrazilXTrends,
+  generateAnglesFromXTrends,
   detectBestSeriesModelId,
   formatTrendDate,
   generateCompleteEpisode,
@@ -57,14 +62,11 @@ let activePortalSubCategory = 'todas';
 let activePortalDateFilter = 'any';
 let activePortalSearchQuery = '';
 let currentAttachedNews = null;
-let driveAutoSyncTimer = null;
-let isDriveAutoSyncing = false;
-let driveAutoSyncPending = false;
-let driveAutoSyncErrorShown = false;
-const selectedXTrendKeys = new Set();
-let xTrendsItemsCache = [];
-let xTrendsLastFetchedAt = '';
-let xTrendsSourceLabel = '';
+let driveProfilesCache = [];
+let activeRadarPortalMode = 'google';
+let activeXDayFilter = 'all';
+let xTrendsCache = { items: [], days: [], fetchedFrom: '', fetchedAt: '' };
+const selectedXTrendIds = new Set();
 
 // Teleprompter state
 let tpInterval = null;
@@ -139,7 +141,7 @@ function wireThemeToggle() {
     const next = (state.settings.theme || 'light') === 'light' ? 'dark' : 'light';
     state.settings.theme = next;
     applyTheme(next);
-    await persist({ skipDriveSync: true });
+    await persist();
   });
 }
 
@@ -149,69 +151,9 @@ function registerServiceWorker() {
   }
 }
 
-async function persist({ skipDriveSync = false } = {}) {
+async function persist() {
   await saveState(state);
   updateMemoryStats();
-  if (!skipDriveSync) {
-    scheduleDriveAutoSync();
-  }
-}
-
-function scheduleDriveAutoSync() {
-  if (!state || state.settings?.driveAutoSync === false) return;
-  const active = getActiveCreator();
-  const webhookUrl = getEffectiveDriveWebhook(state, active);
-  if (!webhookUrl) return;
-
-  if (driveAutoSyncTimer) clearTimeout(driveAutoSyncTimer);
-  driveAutoSyncTimer = setTimeout(() => {
-    driveAutoSyncTimer = null;
-    runBackgroundDriveSync();
-  }, 2200);
-}
-
-async function runBackgroundDriveSync() {
-  if (state?.settings?.driveAutoSync === false) return;
-  const active = getActiveCreator();
-  const webhookUrl = getEffectiveDriveWebhook(state, active);
-  if (!webhookUrl) return;
-
-  if (isDriveAutoSyncing) {
-    driveAutoSyncPending = true;
-    return;
-  }
-
-  isDriveAutoSyncing = true;
-  const driveTextEl = document.getElementById('driveStatusText');
-  if (driveTextEl) driveTextEl.textContent = 'Drive · Salvando...';
-
-  try {
-    const onlyActive = active?.driveOnlyActive !== false;
-    const payloadState = buildFilteredDriveState(state, active?.id, onlyActive);
-    const res = await syncToGoogleDrive(payloadState, webhookUrl);
-    const syncedAt = res.syncedAt || new Date().toISOString();
-    if (active) {
-      active.driveLastSync = syncedAt;
-      active.driveFolderUrl = res.folderUrl || active.driveFolderUrl || '';
-    }
-    state.settings.lastDriveSync = syncedAt;
-    state.settings.driveFolderUrl = res.folderUrl || state.settings.driveFolderUrl || '';
-    await saveState(state);
-    driveAutoSyncErrorShown = false;
-  } catch (err) {
-    console.warn('Auto-sync Drive falhou:', err);
-    if (!driveAutoSyncErrorShown) {
-      driveAutoSyncErrorShown = true;
-      showToast(`Sincronização automática no Drive falhou: ${err.message}`, 'err');
-    }
-  } finally {
-    isDriveAutoSyncing = false;
-    updateStatusIndicators();
-    if (driveAutoSyncPending) {
-      driveAutoSyncPending = false;
-      scheduleDriveAutoSync();
-    }
-  }
 }
 
 function getActiveCreator() {
@@ -345,11 +287,12 @@ function wireNavigation() {
   });
 
   // Scoped subtabs (so Factory and Library subtabs work independently)
-  document.querySelectorAll('.subtab').forEach((btn) => {
+  document.querySelectorAll('.subtab[data-subtab]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const parent = btn.closest('.tab-panel, .card');
       const targetId = btn.dataset.subtab;
-      parent.querySelectorAll('.subtab').forEach((b) => b.classList.remove('active'));
+      if (!targetId) return;
+      parent.querySelectorAll('.subtab[data-subtab]').forEach((b) => b.classList.remove('active'));
       btn.classList.add('active');
       parent.querySelectorAll('.subtab-panel').forEach((p) => {
         p.classList.toggle('active', p.id === targetId);
@@ -407,8 +350,6 @@ function refreshAllUI() {
   renderWeeklyGrid();
   renderFaqAccordion();
   renderCachedHotTopics();
-  renderCachedXTrends();
-  renderProfileHistory();
   updateStatusIndicators();
   updateMemoryStats();
 }
@@ -552,23 +493,17 @@ function wireModals() {
   });
 
   document.getElementById('openDriveModalBtn').addEventListener('click', () => {
-    const active = getActiveCreator();
-    const label = document.getElementById('driveProfileLabel');
-    if (label) label.textContent = `${active?.name || 'Criador Ativo'} (${active?.handle || '@perfil'})`;
-    document.getElementById('m_driveUrl').value = getEffectiveDriveWebhook(state, active);
-    document.getElementById('m_driveOnlyActiveCreator').checked = active?.driveOnlyActive !== false;
-    const autoSyncEl = document.getElementById('m_driveAutoSync');
-    if (autoSyncEl) autoSyncEl.checked = state.settings?.driveAutoSync !== false;
-    updateStatusIndicators();
-    document.getElementById('driveModal').classList.remove('hidden');
+    openDriveModalForActiveCreator();
+  });
+
+  document.getElementById('refreshDriveProfilesBtn').addEventListener('click', () => {
+    loadAndRenderDriveProfiles({ silent: false });
   });
 
   document.getElementById('saveDriveUrlBtn').addEventListener('click', async () => {
     const active = getActiveCreator();
     const url = document.getElementById('m_driveUrl').value.trim();
     const onlyActive = document.getElementById('m_driveOnlyActiveCreator').checked;
-    const autoSyncEl = document.getElementById('m_driveAutoSync');
-    state.settings.driveAutoSync = autoSyncEl ? autoSyncEl.checked : true;
     if (active) {
       active.driveWebhookUrl = url;
       active.driveOnlyActive = onlyActive;
@@ -578,7 +513,10 @@ function wireModals() {
     }
     await persist();
     updateStatusIndicators();
-    showToast(`Configurações do Google Drive salvas para "${active?.name || 'Perfil'}"!`, 'ok');
+    showToast(`URL do Google Drive salva para "${active?.name || 'Perfil'}"!`, 'ok');
+    if (url) {
+      loadAndRenderDriveProfiles({ silent: true });
+    }
   });
 
   document.getElementById('exportBackupBtn').addEventListener('click', () => {
@@ -612,8 +550,6 @@ function wireModals() {
     const active = getActiveCreator();
     const url = document.getElementById('m_driveUrl').value.trim();
     const onlyActive = document.getElementById('m_driveOnlyActiveCreator').checked;
-    const autoSyncEl = document.getElementById('m_driveAutoSync');
-    state.settings.driveAutoSync = autoSyncEl ? autoSyncEl.checked : true;
     if (active) {
       active.driveWebhookUrl = url;
       active.driveOnlyActive = onlyActive;
@@ -621,7 +557,7 @@ function wireModals() {
         state.settings.driveWebhookUrl = url;
       }
     }
-    await persist({ skipDriveSync: true });
+    await persist();
     const btn = document.getElementById('syncDriveNowBtn');
     btn.disabled = true;
     btn.textContent = '⏳ Sincronizando...';
@@ -635,11 +571,12 @@ function wireModals() {
       }
       state.settings.lastDriveSync = syncedAt;
       state.settings.driveFolderUrl = res.folderUrl || '';
-      await persist({ skipDriveSync: true });
+      await persist();
       updateStatusIndicators();
+      loadAndRenderDriveProfiles({ silent: true });
       showToast(
         onlyActive
-          ? `Pasta de "${active?.name}" salva no Google Drive deste perfil!`
+          ? `Perfil "${active?.name}" salvo no Google Drive (sincronização bidirecional ativa)!`
           : 'Salvo na pasta "Reels Lab - Studio" do Google Drive!',
         'ok'
       );
@@ -659,7 +596,7 @@ function wireModals() {
       active.driveWebhookUrl = url;
       active.driveOnlyActive = onlyActive;
     }
-    await persist({ skipDriveSync: true });
+    await persist();
     const btn = document.getElementById('loadDriveNowBtn');
     btn.disabled = true;
     btn.textContent = '⏳ Carregando...';
@@ -675,7 +612,7 @@ function wireModals() {
           updatedActive.driveOnlyActive = onlyActive;
         }
         applyTheme(state.settings?.theme || 'light');
-        await persist({ skipDriveSync: true });
+        await persist();
         refreshAllUI();
         showToast('Dados carregados do Google Drive!', 'ok');
       }
@@ -687,13 +624,6 @@ function wireModals() {
     }
   });
 
-  document.getElementById('openProfileHistoryFromDriveBtn')?.addEventListener('click', async () => {
-    document.getElementById('driveModal').classList.add('hidden');
-    switchTab('tab-creator');
-    document.getElementById('creatorHistoryCard')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    await refreshProfileHistoryFromDrive();
-  });
-
   document.getElementById('copyAppsScriptBtn').addEventListener('click', async () => {
     try {
       const res = await fetch('./google-apps-script.gs');
@@ -702,6 +632,164 @@ function wireModals() {
     } catch {
       showToast('Abra o arquivo google-apps-script.gs na pasta do projeto para copiar.', 'err');
     }
+  });
+}
+
+function getDriveModalUrl() {
+  const modalUrl = document.getElementById('m_driveUrl')?.value.trim() || '';
+  return modalUrl || getEffectiveDriveWebhook(state, getActiveCreator());
+}
+
+function openDriveModalForActiveCreator() {
+  const active = getActiveCreator();
+  const label = document.getElementById('driveProfileLabel');
+  if (label) label.textContent = `${active?.name || 'Criador Ativo'} (${active?.handle || '@perfil'})`;
+  const webhook = getEffectiveDriveWebhook(state, active);
+  document.getElementById('m_driveUrl').value = webhook;
+  document.getElementById('m_driveOnlyActiveCreator').checked = active?.driveOnlyActive !== false;
+  updateStatusIndicators();
+  document.getElementById('driveModal').classList.remove('hidden');
+  if (webhook) {
+    loadAndRenderDriveProfiles({ silent: true });
+  } else {
+    renderDriveProfilesList();
+  }
+}
+
+async function loadAndRenderDriveProfiles({ silent = false } = {}) {
+  const listEl = document.getElementById('driveProfilesList');
+  const btn = document.getElementById('refreshDriveProfilesBtn');
+  const webhook = getDriveModalUrl();
+  if (!webhook) {
+    driveProfilesCache = [];
+    renderDriveProfilesList();
+    if (!silent) {
+      showToast('Cole a URL do Google Apps Script acima antes de listar os perfis do Drive.', 'err');
+    }
+    return;
+  }
+
+  if (listEl) {
+    listEl.innerHTML = `<div class="sub-card"><span class="ai-loading-inline"><span class="ai-spinner" aria-hidden="true"></span><span>Consultando perfis salvos no Google Drive...</span></span></div>`;
+  }
+
+  try {
+    driveProfilesCache = await runWithStatusTicker(
+      btn,
+      'Listando...',
+      () => listDriveProfiles(webhook),
+      { showModelName: false }
+    );
+    renderDriveProfilesList();
+  } catch (err) {
+    if (listEl) {
+      listEl.innerHTML = `<div class="muted-sm" style="color:var(--red);">${escapeHtml(err.message)}</div>`;
+    }
+    if (!silent) showToast(err.message, 'err');
+  }
+}
+
+function renderDriveProfilesList() {
+  const listEl = document.getElementById('driveProfilesList');
+  if (!listEl) return;
+  const webhook = getDriveModalUrl();
+  if (!webhook) {
+    listEl.innerHTML = `<div class="muted-sm">Conecte a URL do Google Apps Script acima para listar, resgatar ou excluir perfis no Google Drive.</div>`;
+    return;
+  }
+
+  if (!driveProfilesCache.length) {
+    listEl.innerHTML = `<div class="muted-sm">Nenhum perfil salvo individualmente no Google Drive ainda. Clique em <strong>☁️ Salvar no Drive Agora</strong> para enviar o perfil ativo.</div>`;
+    return;
+  }
+
+  listEl.innerHTML = driveProfilesCache.map((prof) => {
+    const existsLocal = state.creators.some((c) => c.id === prof.id);
+    const updatedText = prof.updatedAt ? formatTrendDate(prof.updatedAt) : 'Recente';
+    return `
+      <div class="drive-profile-row" data-id="${escapeHtml(prof.id)}">
+        <div class="drive-profile-meta">
+          <div class="drive-profile-title">
+            <span>${escapeHtml(prof.name)}</span>
+            <span class="muted-xs">${escapeHtml(prof.handle || 'sem @')}</span>
+            <span class="badge-pill">${existsLocal ? '✓ No App e no Drive' : '☁️ Somente no Drive'}</span>
+          </div>
+          <div class="muted-xs">
+            ${escapeHtml(prof.niche || 'Sem nicho')} • ${Number(prof.seriesCount || 0)} série(s) • ${Number(prof.episodesCount || 0)} roteiro(s) • 🕒 ${escapeHtml(updatedText)}
+          </div>
+        </div>
+        <div class="drive-profile-actions">
+          <button type="button" class="btn btn-primary btn-xs restore-drive-profile-btn" data-id="${escapeHtml(prof.id)}">
+            ${existsLocal ? '🔄 Atualizar do Drive' : '📥 Resgatar p/ o App'}
+          </button>
+          <button type="button" class="btn btn-danger-outline btn-xs delete-drive-profile-btn" data-id="${escapeHtml(prof.id)}" data-name="${escapeHtml(prof.name)}">
+            🗑️ Excluir do Drive
+          </button>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  listEl.querySelectorAll('.restore-drive-profile-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const targetId = btn.dataset.id;
+      const url = getDriveModalUrl();
+      try {
+        const res = await runWithStatusTicker(btn, 'Resgatando...', () => loadDriveProfile(url, targetId), { showModelName: false });
+        if (!res.found || !res.profile) {
+          showToast('Perfil não encontrado no Google Drive.', 'err');
+          return;
+        }
+        state = upsertImportedProfile(state, res.profile, { driveWebhookUrl: url });
+        currentEditingEpisodeId = null;
+        await persist();
+        refreshAllUI();
+        const firstEp = getCreatorEpisodes()[0];
+        if (firstEp) loadEpisodeIntoFactory(firstEp);
+        else clearFactoryFields();
+        renderDriveProfilesList();
+        showToast(`Perfil "${res.profile.creator?.name}" resgatado do Google Drive para o App!`, 'ok');
+      } catch (err) {
+        showToast(err.message, 'err');
+      }
+    });
+  });
+
+  listEl.querySelectorAll('.delete-drive-profile-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const targetId = btn.dataset.id;
+      const targetName = btn.dataset.name || 'Perfil';
+      const url = getDriveModalUrl();
+      if (!confirm(`Excluir permanentemente o perfil "${targetName}" do Google Drive (backup e pasta na nuvem)?`)) {
+        return;
+      }
+      try {
+        await runWithStatusTicker(
+          btn,
+          'Excluindo...',
+          () => deleteDriveProfile(url, { creatorId: targetId, creatorName: targetName, deleteReadableFolder: true }),
+          { showModelName: false }
+        );
+        driveProfilesCache = driveProfilesCache.filter((p) => p.id !== targetId);
+
+        const existsLocal = state.creators.some((c) => c.id === targetId);
+        if (existsLocal && state.creators.length > 1) {
+          if (confirm(`O perfil "${targetName}" também está salvo neste aparelho. Deseja removê-lo do App também?`)) {
+            state = removeCreatorFromState(state, targetId);
+            currentEditingEpisodeId = null;
+            await persist();
+            refreshAllUI();
+            const nextEp = getCreatorEpisodes()[0];
+            if (nextEp) loadEpisodeIntoFactory(nextEp);
+            else clearFactoryFields();
+          }
+        }
+        renderDriveProfilesList();
+        showToast(`Perfil "${targetName}" excluído do Google Drive!`, 'ok');
+      } catch (err) {
+        showToast(err.message, 'err');
+      }
+    });
   });
 }
 
@@ -749,22 +837,37 @@ function wireCreatorTab() {
     showToast(`Perfil ativo: ${getActiveCreator().name}`, 'ok');
   });
 
+  document.getElementById('openDriveProfilesBtn').addEventListener('click', () => {
+    openDriveModalForActiveCreator();
+  });
+
   document.getElementById('saveCreatorBtn').addEventListener('click', async () => {
-    const current = getActiveCreator();
-    recordProfileSnapshot(current, 'Antes de salvar edição');
-    syncFormToActiveCreator();
-    recordProfileSnapshot(current, 'Perfil salvo');
+    const active = syncFormToActiveCreator();
     await persist();
     renderCreatorSelect();
     renderFactoryContextBar();
     renderQuickFillFactory();
-    renderProfileHistory();
     await updateCoverPreview();
-    showToast('DNA do Criador salvo na memória e histórico!', 'ok');
-  });
 
-  document.getElementById('refreshProfileHistoryBtn')?.addEventListener('click', async () => {
-    await refreshProfileHistoryFromDrive();
+    const webhook = getEffectiveDriveWebhook(state, active);
+    if (webhook) {
+      try {
+        const payloadState = buildFilteredDriveState(state, active?.id, active?.driveOnlyActive !== false);
+        const res = await syncToGoogleDrive(payloadState, webhook, { mergeProfiles: true });
+        if (active) {
+          active.driveLastSync = res.syncedAt || new Date().toISOString();
+          active.driveFolderUrl = res.folderUrl || active.driveFolderUrl || '';
+          await persist();
+          updateStatusIndicators();
+        }
+        showToast(`DNA de "${active.name}" salvo no App e sincronizado no Google Drive!`, 'ok');
+        return;
+      } catch {
+        showToast('DNA salvo na memória do aparelho! (Não foi possível enviar ao Drive agora.)', 'ok');
+        return;
+      }
+    }
+    showToast('DNA do Criador salvo na memória!', 'ok');
   });
 
   document.getElementById('quickFillActiveCreatorBtn').addEventListener('click', async () => {
@@ -810,14 +913,30 @@ function wireCreatorTab() {
     }
     const active = getActiveCreator();
     if (!confirm(`Excluir o perfil "${active.name}" e suas séries/roteiros?`)) return;
-    recordProfileSnapshot(active, 'Antes de excluir perfil');
-    state.creators = state.creators.filter((c) => c.id !== active.id);
-    state.series = state.series.filter((s) => s.creatorId !== active.id);
-    state.episodes = state.episodes.filter((e) => e.creatorId !== active.id);
-    state.activeCreatorId = state.creators[0].id;
+
+    const webhook = getEffectiveDriveWebhook(state, active);
+    let removedFromDrive = false;
+    if (webhook && confirm(`Deseja também excluir "${active.name}" do Google Drive (backup e pasta na nuvem)?\n\nOK = Excluir do App e do Google Drive\nCancelar = Excluir apenas deste aparelho`)) {
+      try {
+        await deleteDriveProfile(webhook, {
+          creatorId: active.id,
+          creatorName: active.name,
+          deleteReadableFolder: true
+        });
+        removedFromDrive = true;
+      } catch (err) {
+        showToast(`Removido localmente, mas falhou no Drive: ${err.message}`, 'err');
+      }
+    }
+
+    state = removeCreatorFromState(state, active.id);
+    currentEditingEpisodeId = null;
     await persist();
     refreshAllUI();
-    showToast('Perfil removido (versão salva no histórico para resgate).', 'ok');
+    const nextEp = getCreatorEpisodes()[0];
+    if (nextEp) loadEpisodeIntoFactory(nextEp);
+    else clearFactoryFields();
+    showToast(removedFromDrive ? 'Perfil removido do App e do Google Drive!' : 'Perfil removido deste aparelho.', 'ok');
   });
 
   document.getElementById('applyProfessionBtn').addEventListener('click', async () => {
@@ -848,182 +967,7 @@ function syncFormToActiveCreator() {
   return c;
 }
 
-function buildProfileFingerprint(c) {
-  if (!c) return '';
-  return JSON.stringify({
-    name: c.name || '',
-    handle: c.handle || '',
-    professionId: c.professionId || '',
-    niche: c.niche || '',
-    positioning: c.positioning || '',
-    targetGroupPrefix: c.targetGroupPrefix || '',
-    audience: c.audience || '',
-    pains: c.pains || '',
-    desires: c.desires || '',
-    objections: c.objections || '',
-    pronoun: c.pronoun || '',
-    tone: c.tone || '',
-    forbiddenWords: c.forbiddenWords || '',
-    product: c.product || '',
-    manychatKeyword: c.manychatKeyword || '',
-    brandColor: c.brandColor || '',
-    visualStyle: c.visualStyle || ''
-  });
-}
-
-function cloneCreatorSnapshot(c) {
-  return {
-    id: c.id,
-    name: c.name || '',
-    handle: c.handle || '',
-    professionId: c.professionId || '',
-    niche: c.niche || '',
-    positioning: c.positioning || '',
-    targetGroupPrefix: c.targetGroupPrefix || 'A pessoa que',
-    audience: c.audience || '',
-    pains: c.pains || '',
-    desires: c.desires || '',
-    objections: c.objections || '',
-    pronoun: c.pronoun || 'você',
-    tone: c.tone || '',
-    forbiddenWords: c.forbiddenWords || '',
-    product: c.product || '',
-    manychatKeyword: c.manychatKeyword || '',
-    brandColor: c.brandColor || '#8B5CF6',
-    visualStyle: c.visualStyle || '',
-    driveWebhookUrl: c.driveWebhookUrl || '',
-    driveOnlyActive: c.driveOnlyActive !== false
-  };
-}
-
-function recordProfileSnapshot(creator, reason = 'Edição salva') {
-  if (!creator || !state) return false;
-  if (!Array.isArray(state.profileHistory)) state.profileHistory = [];
-
-  const fingerprint = buildProfileFingerprint(creator);
-  const latestForCreator = state.profileHistory.find((h) => h.creatorId === creator.id);
-  if (latestForCreator && buildProfileFingerprint(latestForCreator.snapshot) === fingerprint && reason !== 'Antes de excluir perfil') {
-    return false;
-  }
-
-  state.profileHistory.unshift({
-    id: uid('phist'),
-    creatorId: creator.id,
-    creatorName: creator.name || 'Criador Sem Nome',
-    handle: creator.handle || '',
-    reason,
-    savedAt: new Date().toISOString(),
-    snapshot: cloneCreatorSnapshot(creator)
-  });
-
-  state.profileHistory = state.profileHistory.slice(0, 80);
-  return true;
-}
-
-async function refreshProfileHistoryFromDrive({ silent = false } = {}) {
-  const active = getActiveCreator();
-  const url = getEffectiveDriveWebhook(state, active);
-  if (!url) {
-    if (!silent) showToast('Conecte a URL do Google Drive deste perfil primeiro.', 'err');
-    return;
-  }
-  const btn = document.getElementById('refreshProfileHistoryBtn');
-  try {
-    const res = btn
-      ? await runWithStatusTicker(btn, 'Buscando no Drive...', () => fetchDriveProfileHistory(url), { showModelName: false })
-      : await fetchDriveProfileHistory(url);
-
-    state.profileHistory = mergeProfileHistoryLists(state.profileHistory || [], res.items || [], 80);
-    await persist({ skipDriveSync: true });
-    renderProfileHistory();
-    if (!silent) {
-      showToast(
-        (res.items || []).length
-          ? `${res.items.length} versão(ões) de perfil carregada(s) do Drive!`
-          : 'Nenhum histórico salvo no Drive ainda (salve ou edite um perfil com Drive ativo).',
-        'ok'
-      );
-    }
-  } catch (err) {
-    if (!silent) showToast(err.message || 'Erro ao buscar histórico no Drive.', 'err');
-  }
-}
-
-function renderProfileHistory() {
-  const listEl = document.getElementById('creatorHistoryList');
-  if (!listEl) return;
-  const history = Array.isArray(state?.profileHistory) ? state.profileHistory : [];
-
-  if (!history.length) {
-    listEl.innerHTML = `<div class="muted-sm">Nenhuma versão anterior salva ainda. Assim que você editar, usar Preencher Rápido ou excluir um perfil, as versões aparecerão aqui e no Google Drive para resgate.</div>`;
-    return;
-  }
-
-  listEl.innerHTML = history.slice(0, 25).map((entry) => {
-    const snap = entry.snapshot || {};
-    const dt = entry.savedAt ? new Date(entry.savedAt).toLocaleString('pt-BR') : 'Data desconhecida';
-    const previewNiche = snap.niche || snap.positioning || 'Sem nicho preenchido';
-    return `
-      <div class="profile-history-row" data-hist-id="${escapeHtml(entry.id)}">
-        <div class="profile-history-info">
-          <div class="inline-controls">
-            <strong>${escapeHtml(snap.name || entry.creatorName || 'Criador')}</strong>
-            <span class="muted-xs">${escapeHtml(snap.handle || entry.handle || '')}</span>
-            <span class="badge-pill">${escapeHtml(entry.reason || 'Versão')}</span>
-          </div>
-          <div class="muted-xs mt-4">🕒 ${escapeHtml(dt)} • ${escapeHtml(previewNiche.slice(0, 110))}</div>
-        </div>
-        <div class="profile-history-actions">
-          <button type="button" class="btn btn-secondary btn-xs restore-profile-here-btn" data-id="${escapeHtml(entry.id)}">↩️ Restaurar no Perfil</button>
-          <button type="button" class="btn btn-primary btn-xs rescue-profile-new-btn" data-id="${escapeHtml(entry.id)}">✨ Resgatar como Novo</button>
-        </div>
-      </div>
-    `;
-  }).join('');
-
-  listEl.querySelectorAll('.restore-profile-here-btn').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      const entry = (state.profileHistory || []).find((h) => h.id === btn.dataset.id);
-      if (!entry?.snapshot) return;
-      const snap = entry.snapshot;
-      const target = state.creators.find((c) => c.id === snap.id || c.id === entry.creatorId) || getActiveCreator();
-      if (!target) return;
-      recordProfileSnapshot(target, 'Antes de restaurar versão');
-      Object.assign(target, cloneCreatorSnapshot(snap), {
-        id: target.id,
-        driveWebhookUrl: target.driveWebhookUrl || snap.driveWebhookUrl || ''
-      });
-      state.activeCreatorId = target.id;
-      await persist();
-      refreshAllUI();
-      showToast(`Versão de "${target.name}" restaurada com sucesso!`, 'ok');
-    });
-  });
-
-  listEl.querySelectorAll('.rescue-profile-new-btn').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      const entry = (state.profileHistory || []).find((h) => h.id === btn.dataset.id);
-      if (!entry?.snapshot) return;
-      const newId = uid('creator');
-      const rescued = {
-        ...cloneCreatorSnapshot(entry.snapshot),
-        id: newId,
-        name: `${entry.snapshot.name || 'Perfil'} (Resgatado)`,
-        driveLastSync: null,
-        driveFolderUrl: ''
-      };
-      state.creators.push(rescued);
-      state.activeCreatorId = newId;
-      await persist();
-      refreshAllUI();
-      showToast(`Perfil "${rescued.name}" resgatado como novo perfil ativo!`, 'ok');
-    });
-  });
-}
-
 async function handleQuickFillActiveCreator() {
-  const preCreator = getActiveCreator();
-  recordProfileSnapshot(preCreator, 'Antes do Preenchimento Rápido');
   const creator = syncFormToActiveCreator();
   if (!creator) return;
 
@@ -1102,7 +1046,6 @@ async function handleQuickFillActiveCreator() {
       }
     });
 
-    recordProfileSnapshot(creator, 'Preenchimento Rápido IA');
     await persist();
     refreshAllUI();
     const note = filled.fallbackReason ? ' (Gemini congestionado no Google — contingência aplicada)' : '';
@@ -1115,7 +1058,6 @@ async function handleQuickFillActiveCreator() {
 async function importProfessionForActiveCreator(profId) {
   const prof = PROFESSIONS.find((p) => p.id === profId);
   if (!prof) return;
-  recordProfileSnapshot(getActiveCreator(), 'Antes de importar profissão');
   const creator = syncFormToActiveCreator();
 
   creator.professionId = prof.id;
@@ -1192,7 +1134,6 @@ async function importProfessionForActiveCreator(profId) {
     }
   });
 
-  recordProfileSnapshot(creator, `Profissão: ${prof.name}`);
   await persist();
   refreshAllUI();
   showToast(`DNA preenchido com "${prof.name}" + ${importedSeriesCount} séries oficiais importadas!`, 'ok');
@@ -1452,68 +1393,221 @@ function wireRadarTab() {
     }
   });
 
-  // Subaba: X Trending Topics Brasil (Últimos 3 dias)
-  document.getElementById('radarSubtabXBtn')?.addEventListener('click', () => {
-    const cache3d = state.hotTopicsCache?._xBrasil3d;
-    if (!xTrendsItemsCache.length && cache3d?.items?.length) {
-      xTrendsItemsCache = cache3d.items;
-      xTrendsLastFetchedAt = cache3d.fetchedAt || '';
-      xTrendsSourceLabel = cache3d.fetchedFrom || '';
-      renderCachedXTrends();
-    } else if (!xTrendsItemsCache.length) {
-      loadXTrendsBrazil();
-    }
+  document.getElementById('radarModeGoogleBtn').addEventListener('click', () => {
+    setRadarPortalMode('google');
   });
 
-  document.getElementById('refreshXTrendsBtn')?.addEventListener('click', () => {
-    loadXTrendsBrazil();
+  document.getElementById('radarModeXBtn').addEventListener('click', () => {
+    setRadarPortalMode('x');
   });
 
-  document.getElementById('clearSelectedXTrendsBtn')?.addEventListener('click', () => {
-    selectedXTrendKeys.clear();
-    renderXTrendsList();
+  document.getElementById('refreshXTrendsBtn').addEventListener('click', () => {
+    loadBrazilXTrends();
   });
 
-  document.getElementById('generateSelectedXTrendsBtn')?.addEventListener('click', async () => {
+  document.getElementById('radarXFilterInput').addEventListener('input', () => {
+    renderRadarXTrends();
+  });
+
+  document.getElementById('clearSelectedXTrendsBtn').addEventListener('click', () => {
+    selectedXTrendIds.clear();
+    renderRadarXTrends();
+  });
+
+  document.getElementById('generateSelectedXTrendsBtn').addEventListener('click', async () => {
     const btn = document.getElementById('generateSelectedXTrendsBtn');
-    const chosen = xTrendsItemsCache.filter((t) => selectedXTrendKeys.has(t.title));
+    const chosen = (xTrendsCache.items || []).filter((it) => selectedXTrendIds.has(it.id));
     if (!chosen.length) {
-      showToast('Selecione pelo menos um Trend do X abaixo.', 'err');
+      showToast('Selecione pelo menos 1 assunto do X Trending Topics abaixo.', 'err');
       return;
     }
 
     try {
       const activeCreator = getActiveCreator();
       const cId = activeCreator.id;
-      const existingCache = state.hotTopicsCache[cId] || { topics: [], xTopics: [] };
-      const res = await runWithStatusTicker(btn, 'Gerando roteiros dos Trends do X...', (onStatus) =>
-        generateAnglesFromSelectedNews({
+      const existingCache = state.hotTopicsCache[cId] || { topics: [], sources: [] };
+      const res = await runWithStatusTicker(btn, 'Gerando roteiros do X...', (onStatus) =>
+        generateAnglesFromXTrends({
           creator: activeCreator,
-          articles: chosen,
-          focusQuery: '',
-          count: chosen.length,
+          trends: chosen,
           apiKey: state.settings.geminiKey,
           modelName: state.settings.geminiModel,
-          sourceLabel: 'TRENDING TOPICS DO X (ANTIGO TWITTER) NO BRASIL — ÚLTIMOS 3 DIAS',
           onStatus
         })
       );
 
+      const newSources = res.topics
+        .filter((t) => t.sourceUrl)
+        .map((t) => ({ title: `${t.trendTitle} (${t.sourceName})`, uri: t.sourceUrl }));
+      const mergedSources = [...newSources, ...(existingCache.sources || [])].filter(
+        (s, idx, arr) => s.uri && arr.findIndex((x) => x.uri === s.uri) === idx
+      );
+
       state.hotTopicsCache[cId] = {
         ...existingCache,
-        xTopics: [...res.topics, ...(existingCache.xTopics || [])].slice(0, 20),
-        xGeneratedBy: `𝕏 Brasil (Últimos 3 dias) + ${formatModelDisplayName(res.modelUsed)}`
+        topics: [...res.topics, ...(existingCache.topics || [])],
+        sources: mergedSources,
+        generatedBy: `𝕏 Trending Topics Brasil (3 dias) + ${formatModelDisplayName(res.modelUsed)}`
       };
 
-      selectedXTrendKeys.clear();
+      selectedXTrendIds.clear();
       await persist();
-      renderCachedXTrends();
-      document.getElementById('xTrendsResults')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      showToast(`${res.topics.length} conteúdo(s) gerado(s) a partir dos Trends do X!`, 'ok');
+      renderCachedHotTopics();
+      renderRadarXTrends();
+      document.getElementById('radarResults').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      showToast(`${res.topics.length} roteiro(s) gerado(s) a partir do X Brasil!`, 'ok');
     } catch (err) {
-      showToast(`Erro ao gerar dos Trends do X: ${err.message}`, 'err');
+      showToast(`Erro ao gerar do X: ${err.message}`, 'err');
     }
   });
+}
+
+function setRadarPortalMode(mode = 'google') {
+  activeRadarPortalMode = mode === 'x' ? 'x' : 'google';
+  const googleBtn = document.getElementById('radarModeGoogleBtn');
+  const xBtn = document.getElementById('radarModeXBtn');
+  const googleSection = document.getElementById('radarPortalSection');
+  const xSection = document.getElementById('radarXSection');
+
+  if (googleBtn) googleBtn.classList.toggle('active', activeRadarPortalMode === 'google');
+  if (xBtn) xBtn.classList.toggle('active', activeRadarPortalMode === 'x');
+  if (googleSection) googleSection.classList.toggle('hidden', activeRadarPortalMode !== 'google');
+  if (xSection) xSection.classList.toggle('hidden', activeRadarPortalMode !== 'x');
+
+  if (activeRadarPortalMode === 'x') {
+    if (!xTrendsCache.items.length) {
+      loadBrazilXTrends();
+    } else {
+      renderRadarXTrends();
+    }
+  }
+}
+
+function updateXSelectionUI() {
+  const count = selectedXTrendIds.size;
+  const countEl = document.getElementById('radarXSelectionCount');
+  const clearBtn = document.getElementById('clearSelectedXTrendsBtn');
+  const genBtn = document.getElementById('generateSelectedXTrendsBtn');
+  if (countEl) {
+    countEl.textContent = count > 0
+      ? `${count} assunto(s) do X selecionado(s) para gerar conteúdo`
+      : 'Selecione assuntos do X abaixo para gerar roteiros';
+  }
+  if (clearBtn) clearBtn.classList.toggle('hidden', count === 0);
+  if (genBtn) genBtn.disabled = count === 0;
+}
+
+async function loadBrazilXTrends() {
+  const listEl = document.getElementById('radarXTrendsList');
+  const btn = document.getElementById('refreshXTrendsBtn');
+  if (listEl) {
+    listEl.innerHTML = `<div class="sub-card"><span class="ai-loading-inline"><span class="ai-spinner" aria-hidden="true"></span><span>Buscando Trending Topics reais do X Brasil (últimos 3 dias)...</span></span></div>`;
+  }
+
+  try {
+    const result = await runWithStatusTicker(
+      btn,
+      'Atualizando X...',
+      () => fetchBrazilXTrends({
+        driveWebhookUrl: getEffectiveDriveWebhook(state, getActiveCreator())
+      }),
+      { showModelName: false }
+    );
+    xTrendsCache = result;
+    selectedXTrendIds.clear();
+    renderRadarXTrends();
+  } catch (err) {
+    if (listEl) {
+      listEl.innerHTML = `<div class="sub-card"><p class="muted-sm" style="color:var(--red);">${escapeHtml(err.message)}</p></div>`;
+    }
+    updateXSelectionUI();
+  }
+}
+
+function renderRadarXTrends() {
+  const dayTabsEl = document.getElementById('radarXDayTabs');
+  const metaEl = document.getElementById('radarXMetaInfo');
+  const listEl = document.getElementById('radarXTrendsList');
+  const filterQ = (document.getElementById('radarXFilterInput')?.value || '').trim().toLowerCase();
+  if (!dayTabsEl || !listEl) return;
+
+  const allItems = Array.isArray(xTrendsCache.items) ? xTrendsCache.items : [];
+
+  dayTabsEl.innerHTML = X_TREND_DAY_FILTERS.map((df) => {
+    const count = df.id === 'all' ? allItems.length : allItems.filter((it) => it.dayKey === df.id).length;
+    return `
+      <button type="button" class="portal-tab-btn x-day-tab-btn ${activeXDayFilter === df.id ? 'active' : ''}" data-day="${escapeHtml(df.id)}">
+        ${escapeHtml(df.label)}${allItems.length ? ` (${count})` : ''}
+      </button>
+    `;
+  }).join('');
+
+  dayTabsEl.querySelectorAll('.x-day-tab-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      activeXDayFilter = btn.dataset.day || 'all';
+      renderRadarXTrends();
+    });
+  });
+
+  if (metaEl) {
+    metaEl.textContent = allItems.length
+      ? `📡 Fonte: ${xTrendsCache.fetchedFrom || 'X Brasil'} • Atualizado em ${formatTrendDate(xTrendsCache.fetchedAt)}`
+      : 'Clique em "🔄 Atualizar X Trends" para carregar os assuntos em alta no X Brasil nos últimos 3 dias.';
+  }
+
+  const filtered = allItems.filter((it) => {
+    if (activeXDayFilter !== 'all' && it.dayKey !== activeXDayFilter) return false;
+    if (filterQ && !`${it.topic} ${it.sourceName}`.toLowerCase().includes(filterQ)) return false;
+    return true;
+  });
+
+  if (!filtered.length) {
+    listEl.innerHTML = `
+      <div class="sub-card">
+        <p class="muted-sm">${allItems.length ? 'Nenhum assunto do X corresponde a este filtro.' : 'Nenhum Trending Topic carregado ainda. Clique em 🔄 Atualizar X Trends acima.'}</p>
+      </div>`;
+    updateXSelectionUI();
+    return;
+  }
+
+  listEl.innerHTML = filtered.map((it) => {
+    const isSelected = selectedXTrendIds.has(it.id);
+    const openUrl = it.xSearchUrl || it.sourceUrl || '#';
+    return `
+      <div class="portal-news-card ${isSelected ? 'selected' : ''}" data-x-id="${escapeHtml(it.id)}">
+        <div>
+          <div class="portal-news-top">
+            <label class="portal-check-wrap">
+              <input type="checkbox" class="x-trend-check" data-x-id="${escapeHtml(it.id)}" ${isSelected ? 'checked' : ''} />
+              <span>Selecionar</span>
+            </label>
+            <div class="inline-controls">
+              <span class="x-trend-rank">#${Number(it.rank || 1)}</span>
+              <span class="badge-pill">${escapeHtml(it.dayLabel || '3 dias')}</span>
+            </div>
+          </div>
+          <div class="x-trend-topic mt-8">${escapeHtml(it.topic)}</div>
+          ${it.volume ? `<div class="x-trend-volume mt-6">🔥 ${escapeHtml(it.volume)}</div>` : ''}
+        </div>
+        <div class="portal-news-footer">
+          <span>𝕏 ${escapeHtml(it.sourceName || 'X Brasil')}</span>
+          <a class="btn btn-secondary btn-xs" href="${escapeHtml(openUrl)}" target="_blank" rel="noopener noreferrer">↗ Ver no X</a>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  listEl.querySelectorAll('.x-trend-check').forEach((chk) => {
+    chk.addEventListener('change', () => {
+      const id = chk.dataset.xId;
+      if (chk.checked) selectedXTrendIds.add(id);
+      else selectedXTrendIds.delete(id);
+      chk.closest('.portal-news-card')?.classList.toggle('selected', chk.checked);
+      updateXSelectionUI();
+    });
+  });
+
+  updateXSelectionUI();
 }
 
 function renderRadarPortal() {
@@ -1653,9 +1747,53 @@ function renderRadarPortal() {
   updatePortalSelectionUI();
 }
 
-function renderRadarTopicCards(container, topics = [], badgePrefix = 'TIMING QUENTE') {
-  if (!container) return;
-  container.innerHTML = topics.map((topic, tIdx) => {
+function renderCachedHotTopics() {
+  const cId = getActiveCreator()?.id;
+  const cached = state.hotTopicsCache?.[cId];
+  const container = document.getElementById('radarResults');
+  const banner = document.getElementById('radarStatusBanner');
+  const sourcesBox = document.getElementById('radarSources');
+
+  if (cached) {
+    activePortalCategory = cached.activeCategory || inferCreatorDefaultCategory(getActiveCreator());
+    activePortalSubCategory = cached.activeSubCategory || 'todas';
+    activePortalDateFilter = cached.dateFilter || 'any';
+    const topDateSel = document.getElementById('radarDateFilter');
+    if (topDateSel) topDateSel.value = activePortalDateFilter;
+    if (cached.portalByCategory && typeof cached.portalByCategory === 'object') {
+      Object.entries(cached.portalByCategory).forEach(([catId, items]) => {
+        const catKey = getPortalCacheKey(catId, 'todas', activePortalDateFilter, '');
+        if (!portalCategoryCache.has(catKey)) {
+          portalCategoryCache.set(catKey, items || []);
+        }
+      });
+    }
+    if (Array.isArray(cached.portalArticles)) {
+      const key = getPortalCacheKey(activePortalCategory, activePortalSubCategory, activePortalDateFilter, cached.focusQuery || '');
+      if (!portalCategoryCache.has(key)) {
+        portalCategoryCache.set(key, cached.portalArticles);
+      }
+    }
+  } else {
+    activePortalCategory = inferCreatorDefaultCategory(getActiveCreator());
+  }
+
+  if (!cached || !cached.topics?.length) {
+    banner.classList.add('hidden');
+    sourcesBox.classList.add('hidden');
+    container.innerHTML = `
+      <div class="card">
+        <h3>Pronto para caçar notícias reais 🔥</h3>
+        <p class="muted-sm mt-6">Clique no botão acima para carregar as manchetes reais do Google Notícias, gerar 5 conteúdos conectados ao DNA de <strong>${escapeHtml(getActiveCreator()?.name)}</strong> e explorar todas as editorias abaixo.</p>
+      </div>`;
+    renderRadarPortal();
+    return;
+  }
+
+  banner.classList.remove('hidden');
+  banner.innerHTML = `📡 <strong>Fonte:</strong> ${escapeHtml(cached.generatedBy || 'Google Notícias')} — Clique em <em>"Criar na Fábrica"</em> em qualquer ângulo abaixo para gerar roteiro, capa e legenda prontos.`;
+
+  container.innerHTML = cached.topics.map((topic, tIdx) => {
     const hasMeta = Boolean(topic.sourceName || topic.publishedAt || topic.sourceUrl);
     const metaHtml = hasMeta ? `
       <div class="trend-source-row">
@@ -1666,7 +1804,7 @@ function renderRadarTopicCards(container, topics = [], badgePrefix = 'TIMING QUE
     <div class="card trend-card">
       <div>
         <div class="inline-controls">
-          <span class="badge-pill">${escapeHtml(badgePrefix)} #${tIdx + 1}</span>
+          <span class="badge-pill">TIMING QUENTE #${tIdx + 1}</span>
           ${topic.categoryLabel ? `<span class="badge-pill">${escapeHtml(topic.categoryLabel)}</span>` : ''}
         </div>
         <h3 class="mt-8">${escapeHtml(topic.trendTitle)}</h3>
@@ -1732,58 +1870,9 @@ function renderRadarTopicCards(container, topics = [], badgePrefix = 'TIMING QUE
       document.getElementById('f_qProblem').value = btn.dataset.bridge;
       updateModelRuleHint();
       switchTab('tab-factory');
-      showToast(`Assunto anexado com modelo ${bestModelObj?.code || bestModelId}! Gere sem pasta ou escolha no Passo 1.`, 'ok');
+      showToast(`Notícia anexada com modelo ${bestModelObj?.code || bestModelId}! Gere sem pasta ou escolha no Passo 1.`, 'ok');
     });
   });
-}
-
-function renderCachedHotTopics() {
-  const cId = getActiveCreator()?.id;
-  const cached = state.hotTopicsCache?.[cId];
-  const container = document.getElementById('radarResults');
-  const banner = document.getElementById('radarStatusBanner');
-  const sourcesBox = document.getElementById('radarSources');
-
-  if (cached) {
-    activePortalCategory = cached.activeCategory || inferCreatorDefaultCategory(getActiveCreator());
-    activePortalSubCategory = cached.activeSubCategory || 'todas';
-    activePortalDateFilter = cached.dateFilter || 'any';
-    const topDateSel = document.getElementById('radarDateFilter');
-    if (topDateSel) topDateSel.value = activePortalDateFilter;
-    if (cached.portalByCategory && typeof cached.portalByCategory === 'object') {
-      Object.entries(cached.portalByCategory).forEach(([catId, items]) => {
-        const catKey = getPortalCacheKey(catId, 'todas', activePortalDateFilter, '');
-        if (!portalCategoryCache.has(catKey)) {
-          portalCategoryCache.set(catKey, items || []);
-        }
-      });
-    }
-    if (Array.isArray(cached.portalArticles)) {
-      const key = getPortalCacheKey(activePortalCategory, activePortalSubCategory, activePortalDateFilter, cached.focusQuery || '');
-      if (!portalCategoryCache.has(key)) {
-        portalCategoryCache.set(key, cached.portalArticles);
-      }
-    }
-  } else {
-    activePortalCategory = inferCreatorDefaultCategory(getActiveCreator());
-  }
-
-  if (!cached || !cached.topics?.length) {
-    banner.classList.add('hidden');
-    sourcesBox.classList.add('hidden');
-    container.innerHTML = `
-      <div class="card">
-        <h3>Pronto para caçar notícias reais 🔥</h3>
-        <p class="muted-sm mt-6">Clique no botão acima para carregar as manchetes reais do Google Notícias, gerar 5 conteúdos conectados ao DNA de <strong>${escapeHtml(getActiveCreator()?.name)}</strong> e explorar todas as editorias abaixo.</p>
-      </div>`;
-    renderRadarPortal();
-    return;
-  }
-
-  banner.classList.remove('hidden');
-  banner.innerHTML = `📡 <strong>Fonte:</strong> ${escapeHtml(cached.generatedBy || 'Google Notícias')} — Clique em <em>"Criar na Fábrica"</em> em qualquer ângulo abaixo para gerar roteiro, capa e legenda prontos.`;
-
-  renderRadarTopicCards(container, cached.topics, 'TIMING QUENTE');
 
   if (cached.sources && cached.sources.length) {
     sourcesBox.classList.remove('hidden');
@@ -1794,145 +1883,6 @@ function renderCachedHotTopics() {
   }
 
   renderRadarPortal();
-}
-
-function updateXTrendsSelectionUI() {
-  const count = selectedXTrendKeys.size;
-  const countEl = document.getElementById('xTrendsSelectionCount');
-  const clearBtn = document.getElementById('clearSelectedXTrendsBtn');
-  const genBtn = document.getElementById('generateSelectedXTrendsBtn');
-  if (countEl) {
-    countEl.textContent = count > 0
-      ? `${count} trend(s) do X selecionado(s) para gerar roteiros`
-      : 'Selecione trends do X abaixo para gerar roteiros conectados ao seu perfil';
-  }
-  if (clearBtn) clearBtn.classList.toggle('hidden', count === 0);
-  if (genBtn) genBtn.disabled = count === 0;
-}
-
-function renderXTrendsList() {
-  const listEl = document.getElementById('xTrendsList');
-  if (!listEl) return;
-
-  if (!xTrendsItemsCache.length) {
-    listEl.innerHTML = `
-      <div class="sub-card">
-        <p class="muted-sm">Clique em <strong>🔄 Buscar Trends do X (3 dias)</strong> acima para carregar os assuntos mais comentados do Brasil no X.</p>
-      </div>`;
-    updateXTrendsSelectionUI();
-    return;
-  }
-
-  listEl.innerHTML = xTrendsItemsCache.map((item, idx) => {
-    const key = item.title;
-    const isSelected = selectedXTrendKeys.has(key);
-    const dateLabel = item.publishedAt || formatTrendDate(item.pubDate);
-    return `
-      <div class="x-trend-card ${isSelected ? 'selected' : ''}" data-key="${escapeHtml(key)}">
-        <div>
-          <div class="portal-news-top">
-            <label class="portal-check-wrap">
-              <input type="checkbox" class="x-trend-check" data-key="${escapeHtml(key)}" ${isSelected ? 'checked' : ''} />
-              <span class="x-trend-rank">#${idx + 1}</span>
-            </label>
-            <div class="inline-controls">
-              ${item.volume ? `<span class="badge-pill">🔥 ${escapeHtml(item.volume)}</span>` : ''}
-              <span class="badge-pill">${escapeHtml(item.sourceName || 'X Brasil')}</span>
-            </div>
-          </div>
-          <div class="x-trend-title mt-8">${escapeHtml(item.title)}</div>
-          ${item.summary ? `<p class="muted-xs mt-6">${escapeHtml(item.summary)}</p>` : ''}
-        </div>
-        <div class="x-trend-footer">
-          <span>🕒 ${escapeHtml(dateLabel)}</span>
-          ${item.link ? `<a class="btn btn-secondary btn-xs" href="${escapeHtml(item.link)}" target="_blank" rel="noopener noreferrer">↗ Ver no X</a>` : ''}
-        </div>
-      </div>
-    `;
-  }).join('');
-
-  listEl.querySelectorAll('.x-trend-check').forEach((chk) => {
-    chk.addEventListener('change', () => {
-      const k = chk.dataset.key;
-      if (chk.checked) selectedXTrendKeys.add(k);
-      else selectedXTrendKeys.delete(k);
-      chk.closest('.x-trend-card')?.classList.toggle('selected', chk.checked);
-      updateXTrendsSelectionUI();
-    });
-  });
-
-  updateXTrendsSelectionUI();
-}
-
-function renderCachedXTrends() {
-  const cId = getActiveCreator()?.id;
-  const cached = state?.hotTopicsCache?.[cId];
-  const globalX = state?.hotTopicsCache?._xBrasil3d;
-  if (!xTrendsItemsCache.length && globalX?.items?.length) {
-    xTrendsItemsCache = globalX.items;
-    xTrendsLastFetchedAt = globalX.fetchedAt || '';
-    xTrendsSourceLabel = globalX.fetchedFrom || '';
-  }
-
-  const resultsEl = document.getElementById('xTrendsResults');
-  const bannerEl = document.getElementById('xTrendsStatusBanner');
-  if (bannerEl) {
-    if (cached?.xTopics?.length || xTrendsItemsCache.length) {
-      bannerEl.classList.remove('hidden');
-      const parts = [];
-      if (xTrendsSourceLabel) parts.push(`Fonte: ${xTrendsSourceLabel}`);
-      if (xTrendsLastFetchedAt) parts.push(`Atualizado em ${new Date(xTrendsLastFetchedAt).toLocaleString('pt-BR')}`);
-      if (cached?.xGeneratedBy) parts.push(`Roteiros: ${cached.xGeneratedBy}`);
-      bannerEl.innerHTML = `𝕏 <strong>${escapeHtml(parts.join(' • ') || 'Trending Topics Brasil (Últimos 3 dias)')}</strong>`;
-    } else {
-      bannerEl.classList.add('hidden');
-    }
-  }
-
-  if (resultsEl) {
-    if (cached?.xTopics?.length) {
-      renderRadarTopicCards(resultsEl, cached.xTopics, '𝕏 TREND');
-    } else {
-      resultsEl.innerHTML = '';
-    }
-  }
-
-  renderXTrendsList();
-}
-
-async function loadXTrendsBrazil() {
-  const btn = document.getElementById('refreshXTrendsBtn');
-  const listEl = document.getElementById('xTrendsList');
-  if (listEl) {
-    listEl.innerHTML = `<div class="sub-card"><span class="ai-loading-inline"><span class="ai-spinner" aria-hidden="true"></span><span>Buscando Trending Topics do X Brasil (últimos 3 dias)...</span></span></div>`;
-  }
-
-  try {
-    const res = await runWithStatusTicker(btn, 'Buscando Trends do X (3 dias)...', (onStatus) =>
-      fetchXBrazilTrends3Days({
-        driveWebhookUrl: getEffectiveDriveWebhook(state, getActiveCreator()),
-        onStatus
-      }),
-      { showModelName: false }
-    );
-    xTrendsItemsCache = res.items || [];
-    xTrendsLastFetchedAt = res.fetchedAt || new Date().toISOString();
-    xTrendsSourceLabel = res.fetchedFrom || 'X Brasil (3 dias)';
-    selectedXTrendKeys.clear();
-    state.hotTopicsCache._xBrasil3d = {
-      items: xTrendsItemsCache,
-      fetchedAt: xTrendsLastFetchedAt,
-      fetchedFrom: xTrendsSourceLabel
-    };
-    await persist({ skipDriveSync: true });
-    renderCachedXTrends();
-    showToast(`${xTrendsItemsCache.length} trends do X Brasil carregados!`, 'ok');
-  } catch (err) {
-    if (listEl) {
-      listEl.innerHTML = `<div class="sub-card"><p class="muted-sm" style="color:var(--red);">${escapeHtml(err.message)}</p></div>`;
-    }
-    showToast(err.message, 'err');
-  }
 }
 
 // ============================================================================
@@ -2031,12 +1981,10 @@ function renderQuickFillFactory() {
       chipsEl.querySelectorAll('.qf-chip-del').forEach((delBtn) => {
         delBtn.addEventListener('click', async () => {
           const active = getActiveCreator();
-          recordProfileSnapshot(active, 'Antes de remover item DNA');
           if (removeCreatorFieldItem(active, delBtn.dataset.kind, delBtn.dataset.text)) {
             await persist();
             loadCreatorIntoForm();
             renderQuickFillFactory();
-            renderProfileHistory();
             showToast('Item removido deste perfil.', 'ok');
           }
         });
@@ -2083,7 +2031,6 @@ async function handleAddCustomQuickFill() {
     : { modelId: 'serie_03', funnel: 'topo' };
 
   const active = getActiveCreator();
-  recordProfileSnapshot(active, 'Antes de adicionar item DNA');
   addCreatorFieldItem(active, kind, text);
   applyQuickFillChoiceToFactory(kind, text, preset.modelId, preset.funnel);
 
@@ -2091,7 +2038,6 @@ async function handleAddCustomQuickFill() {
   await persist();
   loadCreatorIntoForm();
   renderQuickFillFactory();
-  renderProfileHistory();
   showToast('Item personalizado salvo no perfil e aplicado no roteiro!', 'ok');
 }
 
