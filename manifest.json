@@ -4,7 +4,7 @@
   "description": "Crie séries de Reels completos, headlines virais, capas 9:16, legendas e prompts de edição com IA.",
   "start_url": "./index.html",
   "display": "standalone",
-  "background_color": "#F5F5F7",
+  "background_color": "#000000",
   "theme_color": "#F5F5F7",
   "orientation": "any",
   "icons": [
@@ -25,12 +25,6 @@
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "maskable"
-    },
-    {
-      "src": "./icon.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
-      "purpose": "any"
     }
   ]
 }

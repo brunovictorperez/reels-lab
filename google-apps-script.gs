@@ -75,37 +75,44 @@ function doPost(e) {
       });
     }
 
-    if (action === 'fetch_trends') {
+    if (action === 'fetch_google_news' || action === 'fetch_trends') {
       var q = String(payload.query || '').trim();
       var niche = String(payload.niche || '').trim();
-      var rawQueries = Array.isArray(payload.queries) ? payload.queries : [];
-      var searchTerms = [];
+      var rawUrls = Array.isArray(payload.urls) ? payload.urls : [];
+      var rawLabels = Array.isArray(payload.labels) ? payload.labels : [];
+      var targetFeeds = [];
 
-      rawQueries.forEach(function (term) {
-        var clean = String(term || '').replace(/[()]/g, ' ').replace(/\s+/g, ' ').trim();
-        if (clean && searchTerms.length < 3) {
-          searchTerms.push(clean);
+      rawUrls.forEach(function (u, idx) {
+        var cleanUrl = String(u || '').trim();
+        if (cleanUrl.indexOf('https://news.google.com/rss') === 0 && targetFeeds.length < 4) {
+          targetFeeds.push({
+            url: cleanUrl,
+            label: String(rawLabels[idx] || 'Google Notícias')
+          });
         }
       });
 
-      if (!searchTerms.length) {
-        var fallbackBase = q || niche || 'economia comportamento brasil';
-        fallbackBase.split(/[\/|,;•–—-]+/).forEach(function (part) {
-          var words = part.trim().split(/\s+/).slice(0, 3).join(' ');
-          if (words && searchTerms.length < 3) searchTerms.push(words);
-        });
+      if (!targetFeeds.length) {
+        var fallbackQuery = q || niche;
+        if (fallbackQuery) {
+          targetFeeds.push({
+            url: 'https://news.google.com/rss/search?q=' + encodeURIComponent(fallbackQuery) + '&hl=pt-BR&gl=BR&ceid=BR:pt',
+            label: 'Google Notícias (' + fallbackQuery + ')'
+          });
+        } else {
+          targetFeeds.push({
+            url: 'https://news.google.com/rss/headlines/section/topic/NATION?hl=pt-BR&gl=BR&ceid=BR:pt',
+            label: 'Brasil'
+          });
+        }
       }
-
-      if (!searchTerms.length) searchTerms.push('brasil comportamento');
 
       var collected = [];
       var seenUrls = {};
 
-      searchTerms.forEach(function (term) {
-        var label = 'Google News (' + term + ')';
-        var feedUrl = 'https://news.google.com/rss/search?q=' + encodeURIComponent(term) + '&hl=pt-BR&gl=BR&ceid=BR:pt-419';
+      targetFeeds.forEach(function (feed) {
         try {
-          var res = UrlFetchApp.fetch(feedUrl, {
+          var res = UrlFetchApp.fetch(feed.url, {
             muteHttpExceptions: true,
             followRedirects: true,
             headers: { 'User-Agent': 'Mozilla/5.0' }
@@ -118,26 +125,28 @@ function doPost(e) {
           if (!channel) return;
 
           var items = channel.getChildren('item');
-          for (var i = 0; i < Math.min(items.length, 5); i++) {
+          for (var i = 0; i < Math.min(items.length, 25); i++) {
             var item = items[i];
             var title = item.getChildText('title') || '';
             var link = item.getChildText('link') || '';
             var pubDate = item.getChildText('pubDate') || '';
             var desc = (item.getChildText('description') || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
             var srcEl = item.getChild('source');
-            var sourceName = (srcEl && srcEl.getText()) ? srcEl.getText() : label;
+            var sourceName = (srcEl && srcEl.getText()) ? srcEl.getText() : feed.label;
+            var cleanTitle = title.replace(/\s+-\s+[^-]+$/, '').trim() || title.trim();
 
-            if (!title || seenUrls[link || title]) continue;
-            seenUrls[link || title] = true;
+            if (!cleanTitle || seenUrls[link || cleanTitle]) continue;
+            seenUrls[link || cleanTitle] = true;
 
             collected.push({
-              title: title.trim(),
+              title: cleanTitle,
               link: link.trim(),
               pubDate: pubDate.trim(),
               sourceName: sourceName.trim(),
-              summary: desc.slice(0, 240),
-              channel: label
+              summary: desc.slice(0, 260),
+              channel: feed.label
             });
+            if (collected.length >= 45) break;
           }
         } catch (feedErr) {
           // Ignora falha pontual de um feed para manter os demais ativos

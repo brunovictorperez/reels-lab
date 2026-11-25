@@ -1,13 +1,13 @@
-const CACHE_NAME = 'reels-lab-v7';
+const CACHE_NAME = 'reels-lab-v8';
 const ASSETS = [
   './',
   './index.html',
   './styles.css',
   './manifest.json',
+  './favicon-32.png',
   './apple-touch-icon.png',
   './icon-192.png',
   './icon-512.png',
-  './icon.svg',
   './js/data-professions.js',
   './js/storage.js',
   './js/gemini.js',

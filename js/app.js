@@ -14,6 +14,13 @@ import {
   removeCreatorFieldItem
 } from './storage.js';
 import {
+  resolveSelectedModel,
+  formatModelDisplayName,
+  GOOGLE_NEWS_CATEGORIES,
+  inferCreatorDefaultCategory,
+  fetchGoogleNewsPortal,
+  generateAnglesFromSelectedNews,
+  formatTrendDate,
   generateCompleteEpisode,
   generateSeriesIdeas,
   searchHotTopics,
@@ -37,6 +44,12 @@ let lastAnalysisOriginalScript = '';
 let lastAnalysisImprovedScript = '';
 let lastCoverExportFallback = null;
 const expandedSeriesIds = new Set();
+const expandedEpisodeIds = new Set();
+const selectedPortalArticleUrls = new Set();
+const portalCategoryCache = new Map();
+let activePortalCategory = 'brasil';
+let activePortalSubCategory = 'todas';
+let activePortalDateFilter = 'any';
 
 // Teleprompter state
 let tpInterval = null;
@@ -153,35 +166,42 @@ function showToast(msg, type = 'info') {
   }, 4400);
 }
 
-async function runWithStatusTicker(buttons, initialStatus, asyncFn) {
+function buildLoadingMarkup(statusText, useModelPrefix = true) {
+  const hasKey = Boolean(state?.settings?.geminiKey);
+  const modelName = hasKey && useModelPrefix ? formatModelDisplayName(state.settings.geminiModel) : '';
+  let text = String(statusText || 'Carregando...');
+  if (modelName) {
+    if (text === modelName) {
+      text = `${modelName} · Gerando...`;
+    } else if (!text.includes(modelName)) {
+      text = `${modelName} · ${text}`;
+    }
+  }
+  return `<span class="ai-loading-inline"><span class="ai-spinner" aria-hidden="true"></span><span>${escapeHtml(text)}</span></span>`;
+}
+
+async function runWithStatusTicker(buttons, initialStatus, asyncFn, options = {}) {
   const list = (Array.isArray(buttons) ? buttons : [buttons]).filter(Boolean);
   const snapshots = list.map((b) => ({ el: b, html: b.innerHTML }));
-  let currentStatus = initialStatus;
-  let elapsed = 0;
+  const useModelPrefix = options?.showModelName !== false;
 
-  const renderLabel = () => {
-    const label = elapsed > 0 ? `⏳ ${elapsed}s · ${currentStatus}` : `⏳ ${currentStatus}`;
+  const renderLabel = (statusText) => {
+    const html = buildLoadingMarkup(statusText, useModelPrefix);
     list.forEach((b) => {
       b.disabled = true;
-      b.textContent = label;
+      b.innerHTML = html;
     });
   };
 
-  renderLabel();
-  const timer = setInterval(() => {
-    elapsed += 1;
-    renderLabel();
-  }, 1000);
+  renderLabel(initialStatus);
 
   try {
     return await asyncFn((nextStatus) => {
       if (nextStatus) {
-        currentStatus = nextStatus;
-        renderLabel();
+        renderLabel(nextStatus);
       }
     });
   } finally {
-    clearInterval(timer);
     snapshots.forEach(({ el, html }) => {
       el.disabled = false;
       el.innerHTML = html;
@@ -317,7 +337,8 @@ function updateStatusIndicators() {
   const aiText = document.getElementById('aiStatusText');
   if (state.settings.geminiKey) {
     aiDot.className = 'dot dot-ok';
-    aiText.textContent = 'IA Conectada';
+    const shortEngine = formatModelDisplayName(state.settings.geminiModel).replace(/^Gemini\s+/i, '');
+    aiText.textContent = `IA: ${shortEngine}`;
   } else {
     aiDot.className = 'dot dot-warn';
     aiText.textContent = 'IA: Local';
@@ -363,7 +384,7 @@ function wireModals() {
   document.getElementById('openAiModalBtn').addEventListener('click', () => {
     document.getElementById('m_geminiKey').value = state.settings.geminiKey || '';
     const modelSel = document.getElementById('m_geminiModel');
-    const savedModel = state.settings.geminiModel || 'auto-gemini-4';
+    const savedModel = resolveSelectedModel(state.settings.geminiModel);
     if (!Array.from(modelSel.options).some((o) => o.value === savedModel)) {
       const opt = document.createElement('option');
       opt.value = savedModel;
@@ -387,7 +408,7 @@ function wireModals() {
     const btn = document.getElementById('checkApiModelsBtn');
     const resultBox = document.getElementById('apiModelsResultBox');
     try {
-      const categorized = await runWithStatusTicker(btn, 'Consultando chave...', () => listAvailableApiModels(key));
+      const categorized = await runWithStatusTicker(btn, 'Consultando chave...', () => listAvailableApiModels(key), { showModelName: false });
       const groups = [
         { label: '⚡ Linha Gemini 4 (Recomendado)', items: categorized.gemini4 || [], selectable: true },
         { label: '✨ Linha Gemini 3', items: categorized.gemini3 || [], selectable: true },
@@ -490,9 +511,7 @@ function wireModals() {
         throw new Error('Arquivo de backup inválido.');
       }
       state = imported;
-      if (!state.settings?.geminiModel || /gemini-2\.|gemini-3\.8-flash-lite|gemini-3\.8-pro|gemini-flash-lite-latest/i.test(state.settings.geminiModel)) {
-        state.settings.geminiModel = 'auto-gemini-4';
-      }
+      state.settings.geminiModel = resolveSelectedModel(state.settings?.geminiModel);
       applyTheme(state.settings?.theme || 'light');
       await persist();
       refreshAllUI();
@@ -899,20 +918,169 @@ async function importProfessionForActiveCreator(profId) {
 }
 
 // ============================================================================
-// TAB 2: RADAR DE TEMAS QUENTES (TIMING + NOTÍCIAS)
+// TAB 2: RADAR DE TEMAS QUENTES (PORTAL GOOGLE NEWS + TIMING)
 // ============================================================================
 
+function getPortalCacheKey(catId, subCatId, dateFilter, focusQuery = '') {
+  const normSub = catId === 'entretenimento' ? (subCatId || 'todas') : 'all';
+  const normQ = catId === 'busca' ? String(focusQuery || '').trim().toLowerCase() : '';
+  return `${catId || 'brasil'}::${normSub}::${dateFilter || 'any'}::${normQ}`;
+}
+
+function getCurrentPortalArticlesList() {
+  const cId = getActiveCreator()?.id;
+  const cached = state.hotTopicsCache?.[cId];
+  const focusQ = cached?.focusQuery || document.getElementById('radarQueryInput')?.value.trim() || '';
+  const key = getPortalCacheKey(activePortalCategory, activePortalSubCategory, activePortalDateFilter, focusQ);
+  if (portalCategoryCache.has(key)) {
+    return portalCategoryCache.get(key) || [];
+  }
+  if (cached && cached.activeCategory === activePortalCategory && (cached.dateFilter || 'any') === activePortalDateFilter) {
+    return cached.portalArticles || [];
+  }
+  return [];
+}
+
+function updatePortalSelectionUI() {
+  const count = selectedPortalArticleUrls.size;
+  const countEl = document.getElementById('radarSelectionCount');
+  const clearBtn = document.getElementById('clearSelectedNewsBtn');
+  const genBtn = document.getElementById('generateSelectedNewsBtn');
+  if (countEl) {
+    countEl.textContent = count > 0
+      ? `${count} notícia(s) selecionada(s) para gerar conteúdo`
+      : 'Selecione notícias abaixo para gerar roteiros extras';
+  }
+  if (clearBtn) clearBtn.classList.toggle('hidden', count === 0);
+  if (genBtn) genBtn.disabled = count === 0;
+}
+
+async function loadPortalCategoryArticles() {
+  const listEl = document.getElementById('radarPortalList');
+  const refreshBtn = document.getElementById('refreshPortalBtn');
+  const cId = getActiveCreator()?.id;
+  const cached = state.hotTopicsCache?.[cId];
+  const focusQ = activePortalCategory === 'busca'
+    ? (cached?.focusQuery || document.getElementById('radarQueryInput').value.trim())
+    : '';
+
+  if (listEl) {
+    listEl.innerHTML = `<div class="sub-card"><span class="ai-loading-inline"><span class="ai-spinner" aria-hidden="true"></span><span>Carregando notícias reais do Google Notícias...</span></span></div>`;
+  }
+
+  try {
+    const portal = await runWithStatusTicker(refreshBtn, 'Atualizando...', () =>
+      fetchGoogleNewsPortal({
+        categoryId: activePortalCategory === 'busca' ? 'brasil' : activePortalCategory,
+        subCategoryId: activePortalSubCategory,
+        focusQuery: focusQ,
+        dateFilter: activePortalDateFilter,
+        driveWebhookUrl: getEffectiveDriveWebhook(state, getActiveCreator())
+      }),
+      { showModelName: false }
+    );
+    const key = getPortalCacheKey(activePortalCategory, activePortalSubCategory, activePortalDateFilter, focusQ);
+    portalCategoryCache.set(key, portal.items || []);
+    selectedPortalArticleUrls.clear();
+    renderRadarPortal();
+  } catch (err) {
+    if (listEl) {
+      listEl.innerHTML = `<div class="sub-card"><p class="muted-sm" style="color:var(--red);">Não foi possível atualizar esta editoria agora: ${escapeHtml(err.message)}</p></div>`;
+    }
+  }
+}
+
 function wireRadarTab() {
-  document.getElementById('searchTrendsBtn').addEventListener('click', async () => {
-    const btn = document.getElementById('searchTrendsBtn');
-    const query = document.getElementById('radarQueryInput').value.trim();
+  const topDateSel = document.getElementById('radarDateFilter');
+  const portalDateSel = document.getElementById('radarPortalDateFilter');
+
+  topDateSel.addEventListener('change', () => {
+    activePortalDateFilter = topDateSel.value || 'any';
+    portalDateSel.value = activePortalDateFilter;
+  });
+
+  portalDateSel.addEventListener('change', () => {
+    activePortalDateFilter = portalDateSel.value || 'any';
+    topDateSel.value = activePortalDateFilter;
+    loadPortalCategoryArticles();
+  });
+
+  document.getElementById('refreshPortalBtn').addEventListener('click', () => {
+    loadPortalCategoryArticles();
+  });
+
+  document.getElementById('clearSelectedNewsBtn').addEventListener('click', () => {
+    selectedPortalArticleUrls.clear();
+    renderRadarPortal();
+  });
+
+  document.getElementById('generateSelectedNewsBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('generateSelectedNewsBtn');
+    const articles = getCurrentPortalArticlesList();
+    const chosen = articles.filter((a) => selectedPortalArticleUrls.has(a.link || a.title));
+    if (!chosen.length) {
+      showToast('Selecione pelo menos uma notícia no portal abaixo.', 'err');
+      return;
+    }
 
     try {
       const activeCreator = getActiveCreator();
-      const result = await runWithStatusTicker(btn, 'Coletando notícias reais & conectando ao nicho...', (onStatus) =>
+      const cId = activeCreator.id;
+      const existingCache = state.hotTopicsCache[cId] || { topics: [], sources: [], portalArticles: articles };
+      const res = await runWithStatusTicker(btn, 'Gerando conteúdos selecionados...', (onStatus) =>
+        generateAnglesFromSelectedNews({
+          creator: activeCreator,
+          articles: chosen,
+          focusQuery: activePortalCategory === 'busca' ? (existingCache.focusQuery || '') : '',
+          count: chosen.length,
+          apiKey: state.settings.geminiKey,
+          modelName: state.settings.geminiModel,
+          onStatus
+        })
+      );
+
+      const newSources = res.topics
+        .filter((t) => t.sourceUrl)
+        .map((t) => ({ title: `${t.trendTitle} (${t.sourceName})`, uri: t.sourceUrl }));
+      const mergedSources = [...newSources, ...(existingCache.sources || [])].filter(
+        (s, idx, arr) => s.uri && arr.findIndex((x) => x.uri === s.uri) === idx
+      );
+      const mergedUsed = [...new Set([...(res.usedArticleLinks || []), ...(existingCache.usedArticleLinks || [])])];
+
+      state.hotTopicsCache[cId] = {
+        ...existingCache,
+        topics: [...res.topics, ...(existingCache.topics || [])],
+        sources: mergedSources,
+        usedArticleLinks: mergedUsed,
+        generatedBy: `Google Notícias (Selecionadas) + ${formatModelDisplayName(res.modelUsed)}`
+      };
+
+      selectedPortalArticleUrls.clear();
+      await persist();
+      renderCachedHotTopics();
+      document.getElementById('radarResults').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      showToast(`${res.topics.length} conteúdo(s) gerado(s) a partir das notícias selecionadas!`, 'ok');
+    } catch (err) {
+      showToast(`Erro ao gerar das selecionadas: ${err.message}`, 'err');
+    }
+  });
+
+  document.getElementById('searchTrendsBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('searchTrendsBtn');
+    const query = document.getElementById('radarQueryInput').value.trim();
+    const dateFilter = document.getElementById('radarDateFilter').value || 'any';
+    activePortalDateFilter = dateFilter;
+    document.getElementById('radarPortalDateFilter').value = dateFilter;
+
+    try {
+      const activeCreator = getActiveCreator();
+      const result = await runWithStatusTicker(btn, 'Buscando no Google Notícias...', (onStatus) =>
         searchHotTopics({
           creator: activeCreator,
           focusQuery: query,
+          categoryId: query ? 'busca' : '',
+          subCategoryId: activePortalSubCategory,
+          dateFilter,
           apiKey: state.settings.geminiKey,
           modelName: state.settings.geminiModel,
           driveWebhookUrl: getEffectiveDriveWebhook(state, activeCreator),
@@ -920,15 +1088,148 @@ function wireRadarTab() {
         })
       );
 
-      const cId = getActiveCreator().id;
+      const cId = activeCreator.id;
+      activePortalCategory = result.activeCategory || (query ? 'busca' : inferCreatorDefaultCategory(activeCreator));
+      activePortalSubCategory = result.activeSubCategory || 'todas';
+      const cacheKey = getPortalCacheKey(activePortalCategory, activePortalSubCategory, dateFilter, query);
+      portalCategoryCache.set(cacheKey, result.portalArticles || []);
+      selectedPortalArticleUrls.clear();
+
       state.hotTopicsCache[cId] = result;
       await persist();
       renderCachedHotTopics();
-      showToast('Radar atualizado com sugestões virais!', 'ok');
+      showToast('Radar atualizado com 5 conteúdos reais do Google Notícias!', 'ok');
     } catch (err) {
       showToast(`Erro no Radar: ${err.message}`, 'err');
     }
   });
+}
+
+function renderRadarPortal() {
+  const cId = getActiveCreator()?.id;
+  const cached = state.hotTopicsCache?.[cId];
+  const tabsEl = document.getElementById('radarCategoryTabs');
+  const subBarEl = document.getElementById('radarSubCategoryBar');
+  const listEl = document.getElementById('radarPortalList');
+  const dateSel = document.getElementById('radarPortalDateFilter');
+  if (!tabsEl || !subBarEl || !listEl) return;
+
+  if (dateSel && dateSel.value !== activePortalDateFilter) {
+    dateSel.value = activePortalDateFilter;
+  }
+
+  const tabs = [...GOOGLE_NEWS_CATEGORIES];
+  if (cached?.focusQuery) {
+    tabs.unshift({ id: 'busca', label: `🔍 Busca: ${cached.focusQuery}` });
+  } else if (activePortalCategory === 'busca') {
+    activePortalCategory = inferCreatorDefaultCategory(getActiveCreator());
+  }
+
+  tabsEl.innerHTML = tabs.map((cat) => `
+    <button type="button" class="portal-tab-btn ${activePortalCategory === cat.id ? 'active' : ''}" data-cat="${escapeHtml(cat.id)}">
+      ${escapeHtml(cat.label)}
+    </button>
+  `).join('');
+
+  tabsEl.querySelectorAll('.portal-tab-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      activePortalCategory = btn.dataset.cat;
+      if (activePortalCategory !== 'entretenimento') {
+        activePortalSubCategory = 'todas';
+      }
+      const focusQ = activePortalCategory === 'busca' ? (cached?.focusQuery || '') : '';
+      const cacheKey = getPortalCacheKey(activePortalCategory, activePortalSubCategory, activePortalDateFilter, focusQ);
+      if (portalCategoryCache.has(cacheKey)) {
+        selectedPortalArticleUrls.clear();
+        renderRadarPortal();
+      } else {
+        loadPortalCategoryArticles();
+      }
+    });
+  });
+
+  const entCat = GOOGLE_NEWS_CATEGORIES.find((c) => c.id === 'entretenimento');
+  if (activePortalCategory === 'entretenimento' && entCat?.subcategories?.length) {
+    subBarEl.classList.remove('hidden');
+    subBarEl.innerHTML = entCat.subcategories.map((sub) => `
+      <button type="button" class="portal-subtab-btn ${activePortalSubCategory === sub.id ? 'active' : ''}" data-sub="${escapeHtml(sub.id)}">
+        ${escapeHtml(sub.label)}
+      </button>
+    `).join('');
+
+    subBarEl.querySelectorAll('.portal-subtab-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        activePortalSubCategory = btn.dataset.sub;
+        const cacheKey = getPortalCacheKey('entretenimento', activePortalSubCategory, activePortalDateFilter, '');
+        if (portalCategoryCache.has(cacheKey)) {
+          selectedPortalArticleUrls.clear();
+          renderRadarPortal();
+        } else {
+          loadPortalCategoryArticles();
+        }
+      });
+    });
+  } else {
+    subBarEl.classList.add('hidden');
+    subBarEl.innerHTML = '';
+  }
+
+  const articles = getCurrentPortalArticlesList();
+  const usedSet = new Set(cached?.usedArticleLinks || []);
+
+  if (!articles.length) {
+    listEl.innerHTML = `
+      <div class="sub-card">
+        <p class="muted-sm">Nenhuma notícia carregada nesta editoria/período ainda. Clique em <strong>🔄 Atualizar Categoria</strong> acima ou faça uma busca principal.</p>
+      </div>`;
+    updatePortalSelectionUI();
+    return;
+  }
+
+  listEl.innerHTML = articles.map((art) => {
+    const key = art.link || art.title;
+    const isSelected = selectedPortalArticleUrls.has(key);
+    const isAlreadyUsed = art.link && usedSet.has(art.link);
+    const dateLabel = art.publishedAt || formatTrendDate(art.pubDate);
+
+    return `
+      <div class="portal-news-card ${isSelected ? 'selected' : ''}" data-key="${escapeHtml(key)}">
+        <div>
+          <div class="portal-news-top">
+            <label class="portal-check-wrap">
+              <input type="checkbox" class="portal-news-check" data-key="${escapeHtml(key)}" ${isSelected ? 'checked' : ''} />
+              <span>Selecionar</span>
+            </label>
+            <div class="inline-controls">
+              ${isAlreadyUsed ? `<span class="badge-pill">✓ Nos roteiros</span>` : ''}
+              <span class="badge-pill">${escapeHtml(art.sourceName || 'Google Notícias')}</span>
+            </div>
+          </div>
+          <div class="portal-news-title mt-8">${escapeHtml(art.title)}</div>
+          ${art.summary ? `<p class="muted-xs mt-6">${escapeHtml(art.summary)}</p>` : ''}
+        </div>
+        <div class="portal-news-footer">
+          <span>🕒 ${escapeHtml(dateLabel)}</span>
+          ${art.link ? `<a class="btn btn-secondary btn-xs" href="${escapeHtml(art.link)}" target="_blank" rel="noopener noreferrer">↗ Abrir notícia</a>` : ''}
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  listEl.querySelectorAll('.portal-news-check').forEach((chk) => {
+    chk.addEventListener('change', () => {
+      const k = chk.dataset.key;
+      if (chk.checked) {
+        selectedPortalArticleUrls.add(k);
+      } else {
+        selectedPortalArticleUrls.delete(k);
+      }
+      chk.closest('.portal-news-card')?.classList.toggle('selected', chk.checked);
+      updatePortalSelectionUI();
+    });
+  });
+
+  updatePortalSelectionUI();
 }
 
 function renderCachedHotTopics() {
@@ -938,31 +1239,51 @@ function renderCachedHotTopics() {
   const banner = document.getElementById('radarStatusBanner');
   const sourcesBox = document.getElementById('radarSources');
 
+  if (cached) {
+    activePortalCategory = cached.activeCategory || inferCreatorDefaultCategory(getActiveCreator());
+    activePortalSubCategory = cached.activeSubCategory || 'todas';
+    activePortalDateFilter = cached.dateFilter || 'any';
+    const topDateSel = document.getElementById('radarDateFilter');
+    if (topDateSel) topDateSel.value = activePortalDateFilter;
+    if (Array.isArray(cached.portalArticles)) {
+      const key = getPortalCacheKey(activePortalCategory, activePortalSubCategory, activePortalDateFilter, cached.focusQuery || '');
+      if (!portalCategoryCache.has(key)) {
+        portalCategoryCache.set(key, cached.portalArticles);
+      }
+    }
+  } else {
+    activePortalCategory = inferCreatorDefaultCategory(getActiveCreator());
+  }
+
   if (!cached || !cached.topics?.length) {
     banner.classList.add('hidden');
     sourcesBox.classList.add('hidden');
     container.innerHTML = `
       <div class="card">
-        <h3>Pronto para caçar assuntos quentes 🔥</h3>
-        <p class="muted-sm mt-6">Clique no botão acima para a IA cruzar notícias de hoje e tendências virais com o DNA de <strong>${escapeHtml(getActiveCreator()?.name)}</strong>.</p>
+        <h3>Pronto para caçar notícias reais 🔥</h3>
+        <p class="muted-sm mt-6">Clique no botão acima para carregar as manchetes reais do Google Notícias, gerar 5 conteúdos conectados ao DNA de <strong>${escapeHtml(getActiveCreator()?.name)}</strong> e explorar todas as editorias abaixo.</p>
       </div>`;
+    renderRadarPortal();
     return;
   }
 
   banner.classList.remove('hidden');
-  banner.innerHTML = `📡 <strong>Fonte:</strong> ${escapeHtml(cached.generatedBy || 'IA')} — Clique em <em>"Criar na Fábrica"</em> em qualquer ângulo abaixo para gerar roteiro, capa e legenda prontos.`;
+  banner.innerHTML = `📡 <strong>Fonte:</strong> ${escapeHtml(cached.generatedBy || 'Google Notícias')} — Clique em <em>"Criar na Fábrica"</em> em qualquer ângulo abaixo para gerar roteiro, capa e legenda prontos.`;
 
   container.innerHTML = cached.topics.map((topic, tIdx) => {
     const hasMeta = Boolean(topic.sourceName || topic.publishedAt || topic.sourceUrl);
     const metaHtml = hasMeta ? `
       <div class="trend-source-row">
-        <span>📰 ${escapeHtml(topic.sourceName || 'Internet')}${topic.publishedAt ? ` • ${escapeHtml(topic.publishedAt)}` : ''}</span>
-        ${topic.sourceUrl ? `<a class="trend-source-link" href="${escapeHtml(topic.sourceUrl)}" target="_blank" rel="noopener">Ler fonte ↗</a>` : ''}
+        <span>📰 <strong>${escapeHtml(topic.sourceName || 'Google Notícias')}</strong>${topic.publishedAt ? ` • 🕒 ${escapeHtml(topic.publishedAt)}` : ''}</span>
+        ${topic.sourceUrl ? `<a class="btn btn-secondary btn-xs" href="${escapeHtml(topic.sourceUrl)}" target="_blank" rel="noopener noreferrer">↗ Abrir notícia</a>` : ''}
       </div>` : '';
     return `
     <div class="card trend-card">
       <div>
-        <span class="badge-pill">TIMING QUENTE #${tIdx + 1}</span>
+        <div class="inline-controls">
+          <span class="badge-pill">TIMING QUENTE #${tIdx + 1}</span>
+          ${topic.categoryLabel ? `<span class="badge-pill">${escapeHtml(topic.categoryLabel)}</span>` : ''}
+        </div>
         <h3 class="mt-8">${escapeHtml(topic.trendTitle)}</h3>
         <p class="muted-sm mt-6">${escapeHtml(topic.timingWhy)}</p>
         ${metaHtml}
@@ -1006,11 +1327,13 @@ function renderCachedHotTopics() {
 
   if (cached.sources && cached.sources.length) {
     sourcesBox.classList.remove('hidden');
-    sourcesBox.innerHTML = `<strong>🔗 Fontes reais consultadas na Internet:</strong> ` +
-      cached.sources.slice(0, 6).map((s) => `<a href="${escapeHtml(s.uri)}" target="_blank" rel="noopener">${escapeHtml(s.title || s.uri)}</a>`).join(' • ');
+    sourcesBox.innerHTML = `<strong>🔗 Notícias oficiais usadas do Google Notícias:</strong> ` +
+      cached.sources.slice(0, 8).map((s) => `<a href="${escapeHtml(s.uri)}" target="_blank" rel="noopener noreferrer">${escapeHtml(s.title || s.uri)}</a>`).join(' • ');
   } else {
     sourcesBox.classList.add('hidden');
   }
+
+  renderRadarPortal();
 }
 
 // ============================================================================
@@ -1555,7 +1878,7 @@ async function handleGenerateEpisode() {
     }
     const modelId = document.getElementById('f_modelSelect').value;
 
-    const generated = await runWithStatusTicker(btn, 'Orquestrando Gemini 4...', (onStatus) =>
+    const generated = await runWithStatusTicker(btn, 'Gerando pacote completo...', (onStatus) =>
       generateCompleteEpisode({
         creator: getActiveCreator(),
         modelId,
@@ -2137,26 +2460,46 @@ function renderSeriesFolders() {
             <div class="card-row mb-12">
               <div class="muted-sm"><strong>${eps.length}</strong> episódio(s) nesta pasta</div>
               <div class="inline-controls">
+                ${eps.length ? `<button type="button" class="btn btn-secondary btn-sm toggle-all-eps-btn" data-id="${s.id}">👁️ ${eps.every((ep) => expandedEpisodeIds.has(ep.id)) ? 'Recolher Partes' : 'Expandir Partes'}</button>` : ''}
                 <button type="button" class="btn btn-gradient btn-sm create-next-part-btn" data-id="${s.id}" data-next="${nextPart}" data-model="${escapeHtml(s.modelId || 'serie_01')}">➕ Criar Parte ${nextPart}</button>
                 <button type="button" class="btn btn-danger-outline btn-sm delete-series-btn" data-id="${s.id}" data-name="${escapeHtml(s.name)}">🗑️ Excluir Pasta</button>
               </div>
             </div>
 
-            ${eps.length ? eps.map((ep) => `
-              <div class="episode-row">
-                <div class="inline-controls" style="gap:12px;">
-                  ${ep.coverDataUrl ? `<img class="ep-thumb" src="${ep.coverDataUrl}" alt="Capa" />` : `<div class="ep-thumb" style="display:grid;place-items:center;font-size:11px;color:var(--text-muted);">P.${ep.partNumber}</div>`}
-                  <div>
-                    <strong>Parte ${ep.partNumber}: ${escapeHtml(ep.title)}</strong>
-                    <div class="muted-xs mt-6">Status: <strong>${escapeHtml(ep.status || 'roteiro')}</strong> • ${ep.script ? 'Roteiro pronto' : 'Ideia aguardando geração'}</div>
+            ${eps.length ? eps.map((ep) => {
+              const isEpExpanded = expandedEpisodeIds.has(ep.id);
+              return `
+              <div class="episode-item-wrap">
+                <div class="episode-row">
+                  <div class="inline-controls" style="gap:12px;">
+                    ${ep.coverDataUrl ? `<img class="ep-thumb" src="${ep.coverDataUrl}" alt="Capa" />` : `<div class="ep-thumb" style="display:grid;place-items:center;font-size:11px;color:var(--text-muted);">P.${ep.partNumber}</div>`}
+                    <div>
+                      <strong>Parte ${ep.partNumber}: ${escapeHtml(ep.title)}</strong>
+                      <div class="muted-xs mt-6">Status: <strong>${escapeHtml(ep.status || 'roteiro')}</strong> • ${ep.script ? 'Roteiro pronto' : 'Ideia aguardando geração'}</div>
+                    </div>
+                  </div>
+                  <div class="inline-controls">
+                    <button type="button" class="btn btn-secondary btn-sm toggle-ep-preview-btn" data-id="${ep.id}" aria-expanded="${isEpExpanded}">${isEpExpanded ? '▴ Ocultar Roteiro' : '👁️ Ver Roteiro'}</button>
+                    ${ep.script ? `<button type="button" class="btn btn-secondary btn-sm copy-ep-script-btn" data-id="${ep.id}">📋 Copiar</button>` : ''}
+                    <button type="button" class="btn btn-primary btn-sm open-ep-btn" data-id="${ep.id}">✏️ Editar na Fábrica</button>
+                    <button type="button" class="btn btn-danger-outline btn-sm del-ep-btn" data-id="${ep.id}">✕</button>
                   </div>
                 </div>
-                <div class="inline-controls">
-                  <button type="button" class="btn btn-primary btn-sm open-ep-btn" data-id="${ep.id}">✏️ Abrir / Gerar</button>
-                  <button type="button" class="btn btn-danger-outline btn-sm del-ep-btn" data-id="${ep.id}">✕</button>
-                </div>
+                ${isEpExpanded ? `
+                  <div class="episode-preview-box">
+                    ${ep.onScreenText ? `<div class="ep-preview-onscreen"><strong>Texto na tela:</strong> ${escapeHtml(ep.onScreenText)}</div>` : ''}
+                    ${ep.script ? `<pre class="ep-preview-script">${escapeHtml(ep.script)}</pre>` : `<p class="muted-sm">Esta parte ainda é apenas uma ideia salva. Clique em <em>Editar na Fábrica</em> para gerar o roteiro completo.</p>`}
+                    <div class="ep-preview-actions">
+                      ${ep.script ? `<button type="button" class="btn btn-secondary btn-xs copy-ep-script-btn" data-id="${ep.id}">📋 Copiar Roteiro</button>` : ''}
+                      ${ep.caption ? `<button type="button" class="btn btn-secondary btn-xs copy-ep-caption-btn" data-id="${ep.id}">📋 Copiar Legenda</button>` : ''}
+                      ${(ep.script || ep.caption || ep.onScreenText) ? `<button type="button" class="btn btn-secondary btn-xs copy-ep-all-btn" data-id="${ep.id}">📋 Copiar Pacote Completo</button>` : ''}
+                      <button type="button" class="btn btn-primary btn-xs open-ep-btn" data-id="${ep.id}">✏️ Abrir na Fábrica</button>
+                    </div>
+                  </div>
+                ` : ''}
               </div>
-            `).join('') : `<p class="muted-sm">Nenhum episódio nesta pasta ainda.</p>`}
+            `;
+            }).join('') : `<p class="muted-sm">Nenhum episódio nesta pasta ainda.</p>`}
           </div>
         ` : ''}
       </div>
@@ -2184,6 +2527,63 @@ function renderSeriesFolders() {
     });
   });
 
+  grid.querySelectorAll('.toggle-all-eps-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const sId = btn.dataset.id;
+      const eps = state.episodes.filter((e) => e.seriesId === sId);
+      const allOpen = eps.length > 0 && eps.every((e) => expandedEpisodeIds.has(e.id));
+      eps.forEach((e) => {
+        if (allOpen) expandedEpisodeIds.delete(e.id);
+        else expandedEpisodeIds.add(e.id);
+      });
+      renderSeriesFolders();
+    });
+  });
+
+  grid.querySelectorAll('.toggle-ep-preview-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const epId = btn.dataset.id;
+      if (expandedEpisodeIds.has(epId)) {
+        expandedEpisodeIds.delete(epId);
+      } else {
+        expandedEpisodeIds.add(epId);
+      }
+      renderSeriesFolders();
+    });
+  });
+
+  grid.querySelectorAll('.copy-ep-script-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const ep = state.episodes.find((e) => e.id === btn.dataset.id);
+      if (!ep?.script) {
+        showToast('Este episódio ainda não possui roteiro gerado.', 'err');
+        return;
+      }
+      await copyText(ep.script);
+    });
+  });
+
+  grid.querySelectorAll('.copy-ep-caption-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const ep = state.episodes.find((e) => e.id === btn.dataset.id);
+      if (ep?.caption) await copyText(ep.caption);
+    });
+  });
+
+  grid.querySelectorAll('.copy-ep-all-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const ep = state.episodes.find((e) => e.id === btn.dataset.id);
+      if (!ep) return;
+      const parts = [
+        `PARTE ${ep.partNumber}: ${ep.title || ''}`,
+        ep.onScreenText ? `\nTEXTO NA TELA:\n${ep.onScreenText}` : '',
+        ep.script ? `\nROTEIRO:\n${ep.script}` : '',
+        ep.caption ? `\nLEGENDA:\n${ep.caption}` : ''
+      ].filter(Boolean).join('\n');
+      await copyText(parts);
+    });
+  });
+
   grid.querySelectorAll('.create-next-part-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
       document.getElementById('f_seriesSelect').value = btn.dataset.id;
@@ -2200,6 +2600,7 @@ function renderSeriesFolders() {
       const sId = btn.dataset.id;
       if (!confirm(`Excluir a pasta "${btn.dataset.name}" e todos os seus episódios?`)) return;
       expandedSeriesIds.delete(sId);
+      state.episodes.filter((e) => e.seriesId === sId).forEach((e) => expandedEpisodeIds.delete(e.id));
       state.series = state.series.filter((s) => s.id !== sId);
       state.episodes = state.episodes.filter((e) => e.seriesId !== sId);
       await persist();
@@ -2222,6 +2623,7 @@ function renderSeriesFolders() {
 
   grid.querySelectorAll('.del-ep-btn').forEach((btn) => {
     btn.addEventListener('click', async () => {
+      expandedEpisodeIds.delete(btn.dataset.id);
       state.episodes = state.episodes.filter((e) => e.id !== btn.dataset.id);
       await persist();
       renderSeriesPartsStrip();
