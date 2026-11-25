@@ -381,7 +381,7 @@
                 </div>
 
                 <div id="trendSeriesNotice" class="info-banner mt-8 hidden">
-                  📌 <strong>Tema vindo do Radar de Trends:</strong> escolha abaixo a <strong>Pasta da Série</strong> e o <strong>Nº da Parte</strong> livremente (ou clique em ➕ Nova).
+                  📌 <strong>Tema vindo do Radar de Trends (notícia anexada):</strong> gere agora mesmo <strong>sem pasta definida</strong> ou escolha livremente uma <strong>Pasta</strong> e o <strong>Nº da Parte</strong> abaixo.
                 </div>
 
                 <div class="form-group mt-8">
@@ -464,6 +464,16 @@
                     <select id="qfProfSelect" class="input"></select>
                     <div id="qfProfIdeas" class="chip-wrap mt-8"></div>
                   </div>
+                </div>
+
+                <div id="f_sourceNewsCard" class="sub-card attached-news-card mt-8">
+                  <label>📰 Notícia de Referência para a IA (opcional / Radar)</label>
+                  <div class="inline-controls">
+                    <input type="url" id="f_sourceNewsUrl" class="input flex-1" placeholder="Cole o link da notícia ou envie pelo Radar de Trends..." />
+                    <a id="f_sourceNewsOpenLink" class="btn btn-secondary btn-xs hidden" href="#" target="_blank" rel="noopener noreferrer">↗ Abrir</a>
+                    <button type="button" id="clearSourceNewsBtn" class="btn btn-secondary btn-xs hidden" title="Remover notícia anexada">✕</button>
+                  </div>
+                  <div id="f_sourceNewsPreview" class="muted-xs mt-6 hidden"></div>
                 </div>
 
                 <div class="form-group">
@@ -787,12 +797,18 @@
 
           <div class="subtabs mb-16">
             <button class="subtab active" data-subtab="lib-folders">📂 Minhas Pastas de Séries</button>
+            <button class="subtab" data-subtab="lib-unfiled">📝 Sem Pasta Definida <span id="unfiledCountBadge" class="badge-pill" style="margin-left:4px;">0</span></button>
             <button class="subtab" data-subtab="lib-catalog">📚 Catálogo 33 Profissões (165 Ideias)</button>
           </div>
 
           <!-- MINHAS PASTAS (EXPANSÃO INLINE NO PRÓPRIO CARD) -->
           <div id="lib-folders" class="subtab-panel active">
             <div id="seriesFoldersGrid" class="series-grid"></div>
+          </div>
+
+          <!-- ROTEIROS AVULSOS (SEM PASTA DEFINIDA) -->
+          <div id="lib-unfiled" class="subtab-panel">
+            <div id="unfiledEpisodesList" class="unfiled-list"></div>
           </div>
 
           <!-- CATÁLOGO 33 PROFISSÕES -->

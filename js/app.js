@@ -45,11 +45,13 @@ let lastAnalysisImprovedScript = '';
 let lastCoverExportFallback = null;
 const expandedSeriesIds = new Set();
 const expandedEpisodeIds = new Set();
+const openMoveEpisodeIds = new Set();
 const selectedPortalArticleUrls = new Set();
 const portalCategoryCache = new Map();
 let activePortalCategory = 'brasil';
 let activePortalSubCategory = 'todas';
 let activePortalDateFilter = 'any';
+let currentAttachedNews = null;
 
 // Teleprompter state
 let tpInterval = null;
@@ -311,7 +313,10 @@ function switchTab(tabId) {
   document.querySelectorAll('.tab-panel').forEach((p) => {
     p.classList.toggle('active', p.id === tabId);
   });
-  if (tabId === 'tab-library') renderSeriesFolders();
+  if (tabId === 'tab-library') {
+    renderSeriesFolders();
+    renderUnfiledEpisodes();
+  }
   if (tabId === 'tab-planner') renderWeeklyGrid();
 }
 
@@ -324,6 +329,7 @@ function refreshAllUI() {
   renderQuickFillFactory();
   updateModelRuleHint();
   renderSeriesFolders();
+  renderUnfiledEpisodes();
   renderCatalog();
   renderWeeklyGrid();
   renderFaqAccordion();
@@ -1322,7 +1328,12 @@ function renderCachedHotTopics() {
                 data-title="${escapeHtml(ang.title)}"
                 data-model="${escapeHtml(ang.modelId || 'codigo_viral')}"
                 data-funnel="${escapeHtml(ang.funnel || 'topo')}"
-                data-bridge="${escapeHtml(topic.bubbleBridge || '')}">
+                data-bridge="${escapeHtml(topic.bubbleBridge || '')}"
+                data-news-url="${escapeHtml(topic.sourceUrl || '')}"
+                data-news-title="${escapeHtml(topic.trendTitle || '')}"
+                data-news-source="${escapeHtml(topic.sourceName || '')}"
+                data-news-date="${escapeHtml(topic.publishedAt || '')}"
+                data-news-summary="${escapeHtml(topic.timingWhy || '')}">
                 🎬 Criar na Fábrica
               </button>
             </div>
@@ -1336,13 +1347,20 @@ function renderCachedHotTopics() {
   container.querySelectorAll('.use-trend-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
       clearFactoryFields({ keepSeriesFree: true });
+      setFactorySourceNews({
+        url: btn.dataset.newsUrl || '',
+        title: btn.dataset.newsTitle || '',
+        sourceName: btn.dataset.newsSource || '',
+        publishedAt: btn.dataset.newsDate || '',
+        summary: btn.dataset.newsSummary || ''
+      });
       document.getElementById('f_modelSelect').value = btn.dataset.model;
       document.getElementById('f_funnelStage').value = btn.dataset.funnel;
       document.getElementById('f_topic').value = btn.dataset.title;
       document.getElementById('f_qProblem').value = btn.dataset.bridge;
       updateModelRuleHint();
       switchTab('tab-factory');
-      showToast('Tema enviado! Escolha livremente a Pasta da Série e o Nº da Parte no Passo 1.', 'ok');
+      showToast('Notícia anexada! Gere direto sem pasta ou escolha Pasta e Parte no Passo 1.', 'ok');
     });
   });
 
@@ -1558,17 +1576,68 @@ function renderFactorySeriesSelect({ preserveSelection = true } = {}) {
   const prevVal = preserveSelection ? sel.value : '';
   const series = getCreatorSeries();
 
-  if (!series.length) {
-    sel.innerHTML = `<option value="">— Crie sua primeira pasta de série —</option>`;
-    return;
-  }
-
-  sel.innerHTML = `<option value="">— Escolha a pasta da série (ou crie ➕ Nova) —</option>` +
+  sel.innerHTML = `<option value="">— Sem pasta definida (Roteiro avulso) —</option>` +
     series.map((s) => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
 
   if (prevVal && series.some((s) => s.id === prevVal)) {
     sel.value = prevVal;
   }
+}
+
+function setFactorySourceNews(newsObj = null) {
+  const urlInput = document.getElementById('f_sourceNewsUrl');
+  const openLink = document.getElementById('f_sourceNewsOpenLink');
+  const clearBtn = document.getElementById('clearSourceNewsBtn');
+  const preview = document.getElementById('f_sourceNewsPreview');
+
+  const url = String(newsObj?.url || '').trim();
+  if (newsObj && (url || newsObj.title)) {
+    currentAttachedNews = {
+      url,
+      title: String(newsObj.title || '').trim(),
+      sourceName: String(newsObj.sourceName || '').trim(),
+      publishedAt: String(newsObj.publishedAt || '').trim(),
+      summary: String(newsObj.summary || '').trim()
+    };
+  } else {
+    currentAttachedNews = null;
+  }
+
+  if (urlInput) urlInput.value = url;
+  if (openLink) {
+    if (url && (url.startsWith('http://') || url.startsWith('https://'))) {
+      openLink.href = url;
+      openLink.classList.remove('hidden');
+    } else {
+      openLink.href = '#';
+      openLink.classList.add('hidden');
+    }
+  }
+  if (clearBtn) {
+    clearBtn.classList.toggle('hidden', !(currentAttachedNews || url));
+  }
+  if (preview) {
+    if (currentAttachedNews?.title) {
+      const metaParts = [currentAttachedNews.sourceName, currentAttachedNews.publishedAt].filter(Boolean).join(' • ');
+      preview.innerHTML = `📌 <strong>${escapeHtml(currentAttachedNews.title)}</strong>${metaParts ? ` <span class="muted-xs">(${escapeHtml(metaParts)})</span>` : ''}`;
+      preview.classList.remove('hidden');
+    } else {
+      preview.innerHTML = '';
+      preview.classList.add('hidden');
+    }
+  }
+}
+
+function getFactorySourceNews() {
+  const typedUrl = document.getElementById('f_sourceNewsUrl')?.value.trim() || '';
+  if (!typedUrl && !currentAttachedNews?.title) return null;
+  return {
+    url: typedUrl || currentAttachedNews?.url || '',
+    title: currentAttachedNews?.title || '',
+    sourceName: currentAttachedNews?.sourceName || '',
+    publishedAt: currentAttachedNews?.publishedAt || '',
+    summary: currentAttachedNews?.summary || ''
+  };
 }
 
 function updateModelRuleHint() {
@@ -1655,6 +1724,29 @@ function wireFactoryTab() {
     updateCoverPreview();
   });
 
+  document.getElementById('f_sourceNewsUrl').addEventListener('input', (e) => {
+    const val = e.target.value.trim();
+    const openLink = document.getElementById('f_sourceNewsOpenLink');
+    const clearBtn = document.getElementById('clearSourceNewsBtn');
+    if (openLink) {
+      if (val.startsWith('http://') || val.startsWith('https://')) {
+        openLink.href = val;
+        openLink.classList.remove('hidden');
+      } else {
+        openLink.href = '#';
+        openLink.classList.add('hidden');
+      }
+    }
+    if (clearBtn) {
+      clearBtn.classList.toggle('hidden', !(val || currentAttachedNews?.title));
+    }
+  });
+
+  document.getElementById('clearSourceNewsBtn').addEventListener('click', () => {
+    setFactorySourceNews(null);
+    showToast('Notícia de referência removida.', 'ok');
+  });
+
   document.getElementById('f_seriesSelect').addEventListener('change', (e) => {
     document.getElementById('trendSeriesNotice')?.classList.add('hidden');
     const serie = state.series.find((s) => s.id === e.target.value);
@@ -1672,7 +1764,11 @@ function wireFactoryTab() {
       renderSeriesPartsStrip();
       updateCoverPreview();
     } else {
+      partEl.value = '';
+      partEl.dataset.manual = '';
+      document.getElementById('cov_seriesLabel').value = '';
       renderSeriesPartsStrip();
+      updateCoverPreview();
     }
   });
 
@@ -1880,30 +1976,32 @@ async function handleGenerateEpisode() {
   const btn = document.getElementById('generateEpisodeBtn');
 
   try {
+    const activeCreator = getActiveCreator();
     const seriesSel = document.getElementById('f_seriesSelect');
-    const seriesId = seriesSel.value;
-    if (!seriesId) {
-      showToast('Escolha uma Pasta da Série no Passo 1 (ou clique em ➕ Nova) antes de gerar.', 'err');
-      seriesSel.focus();
-      seriesSel.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      return;
+    const seriesId = seriesSel.value || '';
+    const serie = seriesId ? state.series.find((s) => s.id === seriesId) : null;
+    const partInput = document.getElementById('f_partNumber');
+
+    let partNumber = null;
+    if (serie) {
+      partNumber = Number(partInput.value);
+      if (!partNumber || partNumber < 1) {
+        const eps = state.episodes.filter((ep) => ep.seriesId === seriesId);
+        partNumber = eps.reduce((max, ep) => Math.max(max, Number(ep.partNumber) || 0), 0) + 1;
+        partInput.value = partNumber;
+      }
+    } else if (partInput.value.trim()) {
+      partNumber = Math.max(1, Number(partInput.value));
     }
 
-    const serie = state.series.find((s) => s.id === seriesId);
-    const partInput = document.getElementById('f_partNumber');
-    let partNumber = Number(partInput.value);
-    if (!partNumber || partNumber < 1) {
-      const eps = state.episodes.filter((ep) => ep.seriesId === seriesId);
-      partNumber = eps.reduce((max, ep) => Math.max(max, Number(ep.partNumber) || 0), 0) + 1;
-      partInput.value = partNumber;
-    }
     const modelId = document.getElementById('f_modelSelect').value;
+    const sourceNews = getFactorySourceNews();
 
     const generated = await runWithStatusTicker(btn, 'Gerando pacote completo...', (onStatus) =>
       generateCompleteEpisode({
-        creator: getActiveCreator(),
+        creator: activeCreator,
         modelId,
-        seriesName: serie?.name || 'Minha Série',
+        seriesName: serie?.name || '',
         partNumber,
         topic: document.getElementById('f_topic').value.trim(),
         funnelStage: document.getElementById('f_funnelStage').value,
@@ -1913,6 +2011,8 @@ async function handleGenerateEpisode() {
           learn: document.getElementById('f_qLearn').value.trim(),
           lifeChange: document.getElementById('f_qLifeChange').value.trim()
         },
+        sourceNews,
+        driveWebhookUrl: getEffectiveDriveWebhook(state, activeCreator),
         apiKey: state.settings.geminiKey,
         modelName: state.settings.geminiModel,
         onStatus
@@ -1936,13 +2036,13 @@ async function handleGenerateEpisode() {
     const primaryHeadline = (generated.headlines && generated.headlines[0]) || generated.title || '';
     document.getElementById('o_selectedHeadline').value = primaryHeadline;
     document.getElementById('cov_headline').value = primaryHeadline;
-    document.getElementById('cov_seriesLabel').value = serie?.name || 'SÉRIE';
+    document.getElementById('cov_seriesLabel').value = serie?.name || '';
     document.getElementById('trendSeriesNotice')?.classList.add('hidden');
 
     updateScriptTimerBadge();
     await updateCoverPreview();
 
-    // Auto-save into the series folder immediately after generation
+    // Auto-save into the series folder or "Sem Pasta Definida" immediately after generation
     const saved = await saveCurrentEpisode({ silent: true });
 
     // Activate Roteiro & Headlines output tab and scroll into view on narrow screens
@@ -1955,7 +2055,9 @@ async function handleGenerateEpisode() {
       }
     }
 
-    const savedSuffix = saved ? ` e salvo na pasta "${serie?.name}" (Parte ${partNumber})!` : '!';
+    const savedSuffix = saved
+      ? (serie ? ` e salvo na pasta "${serie.name}" (Parte ${partNumber})!` : ' e salvo em "Sem Pasta Definida"!')
+      : '!';
     if (generated.fallbackReason) {
       showToast(`Google Gemini em pico de demanda — gerado via Contingência${savedSuffix}`, 'ok');
     } else {
@@ -2021,21 +2123,18 @@ async function updateCoverPreview() {
 }
 
 async function saveCurrentEpisode({ silent = false } = {}) {
-  const seriesId = document.getElementById('f_seriesSelect').value;
-  if (!seriesId) {
-    if (!silent) showToast('Selecione ou crie uma pasta de série antes de salvar.', 'err');
-    return null;
-  }
-
+  const seriesId = document.getElementById('f_seriesSelect').value || '';
   const partInput = document.getElementById('f_partNumber');
-  const partNumber = Math.max(1, Number(partInput.value) || 1);
-  partInput.value = partNumber;
+  const partNumber = seriesId
+    ? Math.max(1, Number(partInput.value) || 1)
+    : (partInput.value.trim() ? Math.max(1, Number(partInput.value)) : null);
+  partInput.value = partNumber || '';
 
   const { dataUrl: cleanCoverUrl } = await renderCleanCoverExport(getCoverOptions());
 
-  // Only overwrite existing episode when both seriesId and partNumber match what was loaded
+  // Only overwrite existing episode when seriesId matches and (for numbered series) partNumber matches
   const candidate = currentEditingEpisodeId ? state.episodes.find((e) => e.id === currentEditingEpisodeId) : null;
-  const existing = (candidate && candidate.seriesId === seriesId && Number(candidate.partNumber) === partNumber)
+  const existing = (candidate && (candidate.seriesId || '') === seriesId && (!seriesId || Number(candidate.partNumber) === partNumber))
     ? candidate
     : null;
 
@@ -2047,13 +2146,15 @@ async function saveCurrentEpisode({ silent = false } = {}) {
     id: existing ? existing.id : uid('ep'),
     creatorId: getActiveCreator().id,
     seriesId,
+    modelId: document.getElementById('f_modelSelect').value,
     partNumber,
-    title: document.getElementById('o_title').value.trim() || document.getElementById('f_topic').value.trim() || 'Episódio sem título',
+    title: document.getElementById('o_title').value.trim() || document.getElementById('f_topic').value.trim() || 'Roteiro sem título',
     onScreenText: document.getElementById('o_onScreenText').value.trim(),
     headlines,
     funnelStage: document.getElementById('f_funnelStage').value,
     viralGoal: document.getElementById('f_viralGoal').value,
     status: document.getElementById('o_status').value,
+    sourceNews: getFactorySourceNews(),
     validation: {
       problem: document.getElementById('f_qProblem').value.trim(),
       learn: document.getElementById('f_qLearn').value.trim(),
@@ -2080,8 +2181,14 @@ async function saveCurrentEpisode({ silent = false } = {}) {
   await persist();
   renderSeriesPartsStrip();
   renderSeriesFolders();
+  renderUnfiledEpisodes();
   if (!silent) {
-    showToast(`Parte ${partNumber} + Capa 9:16 salvas na Pasta da Série!`, 'ok');
+    showToast(
+      seriesId
+        ? `Parte ${partNumber} + Capa 9:16 salvas na Pasta da Série!`
+        : 'Roteiro avulso + Capa 9:16 salvos na aba "Sem Pasta Definida"!',
+      'ok'
+    );
   }
   return payload;
 }
@@ -2091,21 +2198,21 @@ function loadEpisodeIntoFactory(ep) {
   currentCoverBgDataUrl = ep.coverBgDataUrl || '';
   document.getElementById('trendSeriesNotice')?.classList.add('hidden');
 
-  const serie = state.series.find((s) => s.id === ep.seriesId);
-  if (serie) {
-    document.getElementById('f_seriesSelect').value = serie.id;
-    document.getElementById('f_modelSelect').value = serie.modelId || 'serie_01';
-    updateModelRuleHint();
-  }
+  const serie = ep.seriesId ? state.series.find((s) => s.id === ep.seriesId) : null;
+  document.getElementById('f_seriesSelect').value = serie ? serie.id : '';
+  document.getElementById('f_modelSelect').value = ep.modelId || serie?.modelId || 'codigo_viral';
+  updateModelRuleHint();
+
   const partEl = document.getElementById('f_partNumber');
-  partEl.value = ep.partNumber || 1;
-  partEl.dataset.manual = '1';
+  partEl.value = ep.partNumber || (serie ? 1 : '');
+  partEl.dataset.manual = ep.partNumber ? '1' : '';
   document.getElementById('f_topic').value = ep.title || '';
   document.getElementById('f_funnelStage').value = ep.funnelStage || 'topo';
   document.getElementById('f_viralGoal').value = ep.viralGoal || 'share';
   document.getElementById('f_qProblem').value = ep.validation?.problem || '';
   document.getElementById('f_qLearn').value = ep.validation?.learn || '';
   document.getElementById('f_qLifeChange').value = ep.validation?.lifeChange || '';
+  setFactorySourceNews(ep.sourceNews || null);
 
   document.getElementById('o_title').value = ep.title || '';
   document.getElementById('o_status').value = ep.status || 'roteiro';
@@ -2119,7 +2226,7 @@ function loadEpisodeIntoFactory(ep) {
   const hl = (ep.headlines && ep.headlines[0]) || ep.title || '';
   document.getElementById('o_selectedHeadline').value = hl;
   document.getElementById('cov_headline').value = hl;
-  document.getElementById('cov_seriesLabel').value = serie?.name || 'SÉRIE';
+  document.getElementById('cov_seriesLabel').value = serie?.name || '';
 
   renderSeriesPartsStrip();
   updateScriptTimerBadge();
@@ -2129,6 +2236,7 @@ function loadEpisodeIntoFactory(ep) {
 function clearFactoryFields({ keepSeriesFree = false } = {}) {
   currentEditingEpisodeId = null;
   currentCoverBgDataUrl = '';
+  setFactorySourceNews(null);
   const seriesSel = document.getElementById('f_seriesSelect');
   const partEl = document.getElementById('f_partNumber');
   const notice = document.getElementById('trendSeriesNotice');
@@ -2144,12 +2252,17 @@ function clearFactoryFields({ keepSeriesFree = false } = {}) {
   } else {
     notice?.classList.add('hidden');
     const seriesId = seriesSel.value;
-    serie = state.series.find((s) => s.id === seriesId);
-    const eps = state.episodes.filter((ep) => ep.seriesId === seriesId);
-    const maxPart = eps.reduce((m, e) => Math.max(m, Number(e.partNumber) || 0), 0);
-    partEl.value = maxPart + 1;
-    partEl.dataset.manual = '';
-    nextPartLabel = serie ? `${serie.name} • Parte ${maxPart + 1}` : '';
+    serie = seriesId ? state.series.find((s) => s.id === seriesId) : null;
+    if (serie) {
+      const eps = state.episodes.filter((ep) => ep.seriesId === seriesId);
+      const maxPart = eps.reduce((m, e) => Math.max(m, Number(e.partNumber) || 0), 0);
+      partEl.value = maxPart + 1;
+      partEl.dataset.manual = '';
+      nextPartLabel = `${serie.name} • Parte ${maxPart + 1}`;
+    } else {
+      partEl.value = '';
+      partEl.dataset.manual = '';
+    }
   }
 
   document.getElementById('f_topic').value = '';
@@ -2443,6 +2556,261 @@ function wireLibraryTab() {
   document.getElementById('catalogCategoryFilter').addEventListener('change', renderCatalog);
 }
 
+function renderEpisodeCardHtml(ep, seriesList) {
+  const isEpExpanded = expandedEpisodeIds.has(ep.id);
+  const isMoveOpen = openMoveEpisodeIds.has(ep.id);
+  const partLabel = ep.partNumber ? `Parte ${ep.partNumber}` : 'Avulso';
+  const thumbBadge = ep.partNumber ? `P.${ep.partNumber}` : 'Avulso';
+  const newsLinkHtml = ep.sourceNews?.url
+    ? ` • <a href="${escapeHtml(ep.sourceNews.url)}" target="_blank" rel="noopener noreferrer">📰 Notícia fonte ↗</a>`
+    : '';
+
+  return `
+    <div class="episode-item-wrap" data-ep-id="${ep.id}">
+      <div class="episode-row">
+        <div class="inline-controls" style="gap:12px;">
+          ${ep.coverDataUrl ? `<img class="ep-thumb" src="${ep.coverDataUrl}" alt="Capa" />` : `<div class="ep-thumb" style="display:grid;place-items:center;font-size:11px;color:var(--text-muted);">${thumbBadge}</div>`}
+          <div>
+            <strong>${partLabel}: ${escapeHtml(ep.title)}</strong>
+            <div class="muted-xs mt-6">Status: <strong>${escapeHtml(ep.status || 'roteiro')}</strong> • ${ep.script ? 'Roteiro pronto' : 'Ideia aguardando geração'}${newsLinkHtml}</div>
+          </div>
+        </div>
+        <div class="inline-controls">
+          <button type="button" class="btn btn-secondary btn-sm toggle-ep-preview-btn" data-id="${ep.id}" aria-expanded="${isEpExpanded}">${isEpExpanded ? '▴ Ocultar Roteiro' : '👁️ Ver Roteiro'}</button>
+          ${ep.script ? `<button type="button" class="btn btn-secondary btn-sm copy-ep-script-btn" data-id="${ep.id}">📋 Copiar</button>` : ''}
+          <button type="button" class="btn btn-secondary btn-sm toggle-ep-move-btn" data-id="${ep.id}">📁 Mover / Parte</button>
+          <button type="button" class="btn btn-primary btn-sm open-ep-btn" data-id="${ep.id}">✏️ Editar na Fábrica</button>
+          <button type="button" class="btn btn-danger-outline btn-sm del-ep-btn" data-id="${ep.id}">✕</button>
+        </div>
+      </div>
+      ${isMoveOpen ? `
+        <div class="episode-move-box" data-ep-id="${ep.id}">
+          <span class="muted-xs" style="font-weight:700;">Mover para:</span>
+          <select class="input input-compact move-ep-series-select" data-id="${ep.id}">
+            <option value="" ${!ep.seriesId ? 'selected' : ''}>Sem pasta definida (Avulso)</option>
+            ${seriesList.map((sr) => `<option value="${sr.id}" ${sr.id === ep.seriesId ? 'selected' : ''}>${escapeHtml(sr.name)}</option>`).join('')}
+          </select>
+          <input type="number" min="1" class="input input-compact move-ep-part-input" data-id="${ep.id}" value="${ep.partNumber || ''}" placeholder="Parte #" title="Número da parte (opcional se avulso)" />
+          <button type="button" class="btn btn-primary btn-xs confirm-move-ep-btn" data-id="${ep.id}">✓ Salvar Posição</button>
+          <button type="button" class="btn btn-secondary btn-xs cancel-move-ep-btn" data-id="${ep.id}">Cancelar</button>
+        </div>
+      ` : ''}
+      ${isEpExpanded ? `
+        <div class="episode-preview-box">
+          ${ep.onScreenText ? `<div class="ep-preview-onscreen"><strong>Texto na tela:</strong> ${escapeHtml(ep.onScreenText)}</div>` : ''}
+          ${ep.sourceNews?.url ? `<div class="ep-preview-onscreen"><strong>📰 Referência:</strong> ${escapeHtml(ep.sourceNews.title || ep.sourceNews.url)} — <a href="${escapeHtml(ep.sourceNews.url)}" target="_blank" rel="noopener noreferrer">Abrir matéria ↗</a></div>` : ''}
+          ${ep.script ? `<pre class="ep-preview-script">${escapeHtml(ep.script)}</pre>` : `<p class="muted-sm">Esta parte ainda é apenas uma ideia salva. Clique em <em>Editar na Fábrica</em> para gerar o roteiro completo.</p>`}
+          <div class="ep-preview-actions">
+            ${ep.script ? `<button type="button" class="btn btn-secondary btn-xs copy-ep-script-btn" data-id="${ep.id}">📋 Copiar Roteiro</button>` : ''}
+            ${ep.caption ? `<button type="button" class="btn btn-secondary btn-xs copy-ep-caption-btn" data-id="${ep.id}">📋 Copiar Legenda</button>` : ''}
+            ${(ep.script || ep.caption || ep.onScreenText) ? `<button type="button" class="btn btn-secondary btn-xs copy-ep-all-btn" data-id="${ep.id}">📋 Copiar Pacote Completo</button>` : ''}
+            <button type="button" class="btn btn-primary btn-xs open-ep-btn" data-id="${ep.id}">✏️ Abrir na Fábrica</button>
+          </div>
+        </div>
+      ` : ''}
+    </div>
+  `;
+}
+
+function bindEpisodeCardEvents(container, seriesList) {
+  container.querySelectorAll('.toggle-ep-preview-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const epId = btn.dataset.id;
+      if (expandedEpisodeIds.has(epId)) {
+        expandedEpisodeIds.delete(epId);
+      } else {
+        expandedEpisodeIds.add(epId);
+      }
+      renderSeriesFolders();
+      renderUnfiledEpisodes();
+    });
+  });
+
+  container.querySelectorAll('.toggle-ep-move-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const epId = btn.dataset.id;
+      if (openMoveEpisodeIds.has(epId)) {
+        openMoveEpisodeIds.delete(epId);
+      } else {
+        openMoveEpisodeIds.add(epId);
+      }
+      renderSeriesFolders();
+      renderUnfiledEpisodes();
+    });
+  });
+
+  container.querySelectorAll('.cancel-move-ep-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      openMoveEpisodeIds.delete(btn.dataset.id);
+      renderSeriesFolders();
+      renderUnfiledEpisodes();
+    });
+  });
+
+  container.querySelectorAll('.move-ep-series-select').forEach((sel) => {
+    sel.addEventListener('change', () => {
+      const box = sel.closest('.episode-move-box');
+      const partInput = box?.querySelector('.move-ep-part-input');
+      if (!partInput) return;
+      const targetSeriesId = sel.value;
+      if (!targetSeriesId) {
+        partInput.value = '';
+        return;
+      }
+      const epsInTarget = state.episodes.filter((e) => e.seriesId === targetSeriesId && e.id !== sel.dataset.id);
+      const nextPart = epsInTarget.reduce((m, e) => Math.max(m, Number(e.partNumber) || 0), 0) + 1;
+      partInput.value = nextPart;
+    });
+  });
+
+  container.querySelectorAll('.confirm-move-ep-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const epId = btn.dataset.id;
+      const ep = state.episodes.find((e) => e.id === epId);
+      const box = btn.closest('.episode-move-box');
+      if (!ep || !box) return;
+
+      const targetSeriesId = box.querySelector('.move-ep-series-select')?.value || '';
+      const rawPart = box.querySelector('.move-ep-part-input')?.value.trim() || '';
+      const nextPart = targetSeriesId
+        ? Math.max(1, Number(rawPart) || 1)
+        : (rawPart ? Math.max(1, Number(rawPart)) : null);
+
+      ep.seriesId = targetSeriesId;
+      ep.partNumber = nextPart;
+      ep.updatedAt = new Date().toISOString();
+      openMoveEpisodeIds.delete(epId);
+      if (targetSeriesId) expandedSeriesIds.add(targetSeriesId);
+
+      if (currentEditingEpisodeId === epId) {
+        document.getElementById('f_seriesSelect').value = targetSeriesId;
+        document.getElementById('f_partNumber').value = nextPart || '';
+        const targetSerie = seriesList.find((s) => s.id === targetSeriesId);
+        document.getElementById('cov_seriesLabel').value = targetSerie?.name || '';
+        updateCoverPreview();
+      }
+
+      await persist();
+      renderFactorySeriesSelect();
+      renderSeriesPartsStrip();
+      renderSeriesFolders();
+      renderUnfiledEpisodes();
+
+      const targetSerie = seriesList.find((s) => s.id === targetSeriesId);
+      showToast(
+        targetSerie
+          ? `Movido para "${targetSerie.name}" (Parte ${nextPart})!`
+          : 'Movido para "Sem Pasta Definida"!',
+        'ok'
+      );
+    });
+  });
+
+  container.querySelectorAll('.copy-ep-script-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const ep = state.episodes.find((e) => e.id === btn.dataset.id);
+      if (!ep?.script) {
+        showToast('Este episódio ainda não possui roteiro gerado.', 'err');
+        return;
+      }
+      await copyText(ep.script);
+    });
+  });
+
+  container.querySelectorAll('.copy-ep-caption-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const ep = state.episodes.find((e) => e.id === btn.dataset.id);
+      if (ep?.caption) await copyText(ep.caption);
+    });
+  });
+
+  container.querySelectorAll('.copy-ep-all-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const ep = state.episodes.find((e) => e.id === btn.dataset.id);
+      if (!ep) return;
+      const parts = [
+        `${ep.partNumber ? `PARTE ${ep.partNumber}` : 'ROTEIRO AVULSO'}: ${ep.title || ''}`,
+        ep.onScreenText ? `\nTEXTO NA TELA:\n${ep.onScreenText}` : '',
+        ep.script ? `\nROTEIRO:\n${ep.script}` : '',
+        ep.caption ? `\nLEGENDA:\n${ep.caption}` : ''
+      ].filter(Boolean).join('\n');
+      await copyText(parts);
+    });
+  });
+
+  container.querySelectorAll('.open-ep-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const ep = state.episodes.find((e) => e.id === btn.dataset.id);
+      if (ep) {
+        loadEpisodeIntoFactory(ep);
+        switchTab('tab-factory');
+      }
+    });
+  });
+
+  container.querySelectorAll('.del-ep-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const id = btn.dataset.id;
+      expandedEpisodeIds.delete(id);
+      openMoveEpisodeIds.delete(id);
+      state.episodes = state.episodes.filter((e) => e.id !== id);
+      await persist();
+      renderSeriesPartsStrip();
+      renderSeriesFolders();
+      renderUnfiledEpisodes();
+      showToast('Episódio removido.', 'ok');
+    });
+  });
+}
+
+function renderUnfiledEpisodes() {
+  const listEl = document.getElementById('unfiledEpisodesList');
+  const badgeEl = document.getElementById('unfiledCountBadge');
+  const series = getCreatorSeries();
+  const validSeriesIds = new Set(series.map((s) => s.id));
+  const unfiled = getCreatorEpisodes().filter((e) => !e.seriesId || !validSeriesIds.has(e.seriesId));
+
+  if (badgeEl) {
+    badgeEl.textContent = String(unfiled.length);
+  }
+  if (!listEl) return;
+
+  if (!unfiled.length) {
+    listEl.innerHTML = `
+      <div class="card">
+        <h3>Nenhum roteiro sem pasta definida</h3>
+        <p class="muted-sm mt-6">Na <strong>Fábrica de Roteiros</strong>, você pode deixar a <em>Pasta da Série</em> em branco para gerar roteiros avulsos rapidamente — eles aparecerão aqui para você revisar, copiar ou mover para qualquer pasta depois.</p>
+      </div>`;
+    return;
+  }
+
+  listEl.innerHTML = `
+    <div class="card">
+      <div class="card-row mb-12">
+        <div>
+          <h3>📝 Roteiros Avulsos (${unfiled.length})</h3>
+          <p class="muted-sm">Expanda quantos quiser para ler/copiar ou use <strong>Mover / Parte</strong> para organizar numa pasta de série.</p>
+        </div>
+        <button type="button" id="toggleAllUnfiledBtn" class="btn btn-secondary btn-sm">
+          👁️ ${unfiled.every((ep) => expandedEpisodeIds.has(ep.id)) ? 'Recolher Todos' : 'Expandir Todos'}
+        </button>
+      </div>
+      ${unfiled.map((ep) => renderEpisodeCardHtml(ep, series)).join('')}
+    </div>
+  `;
+
+  document.getElementById('toggleAllUnfiledBtn')?.addEventListener('click', () => {
+    const allOpen = unfiled.every((ep) => expandedEpisodeIds.has(ep.id));
+    unfiled.forEach((ep) => {
+      if (allOpen) expandedEpisodeIds.delete(ep.id);
+      else expandedEpisodeIds.add(ep.id);
+    });
+    renderUnfiledEpisodes();
+  });
+
+  bindEpisodeCardEvents(listEl, series);
+}
+
 function renderSeriesFolders() {
   const grid = document.getElementById('seriesFoldersGrid');
   const series = getCreatorSeries();
@@ -2487,40 +2855,7 @@ function renderSeriesFolders() {
               </div>
             </div>
 
-            ${eps.length ? eps.map((ep) => {
-              const isEpExpanded = expandedEpisodeIds.has(ep.id);
-              return `
-              <div class="episode-item-wrap">
-                <div class="episode-row">
-                  <div class="inline-controls" style="gap:12px;">
-                    ${ep.coverDataUrl ? `<img class="ep-thumb" src="${ep.coverDataUrl}" alt="Capa" />` : `<div class="ep-thumb" style="display:grid;place-items:center;font-size:11px;color:var(--text-muted);">P.${ep.partNumber}</div>`}
-                    <div>
-                      <strong>Parte ${ep.partNumber}: ${escapeHtml(ep.title)}</strong>
-                      <div class="muted-xs mt-6">Status: <strong>${escapeHtml(ep.status || 'roteiro')}</strong> • ${ep.script ? 'Roteiro pronto' : 'Ideia aguardando geração'}</div>
-                    </div>
-                  </div>
-                  <div class="inline-controls">
-                    <button type="button" class="btn btn-secondary btn-sm toggle-ep-preview-btn" data-id="${ep.id}" aria-expanded="${isEpExpanded}">${isEpExpanded ? '▴ Ocultar Roteiro' : '👁️ Ver Roteiro'}</button>
-                    ${ep.script ? `<button type="button" class="btn btn-secondary btn-sm copy-ep-script-btn" data-id="${ep.id}">📋 Copiar</button>` : ''}
-                    <button type="button" class="btn btn-primary btn-sm open-ep-btn" data-id="${ep.id}">✏️ Editar na Fábrica</button>
-                    <button type="button" class="btn btn-danger-outline btn-sm del-ep-btn" data-id="${ep.id}">✕</button>
-                  </div>
-                </div>
-                ${isEpExpanded ? `
-                  <div class="episode-preview-box">
-                    ${ep.onScreenText ? `<div class="ep-preview-onscreen"><strong>Texto na tela:</strong> ${escapeHtml(ep.onScreenText)}</div>` : ''}
-                    ${ep.script ? `<pre class="ep-preview-script">${escapeHtml(ep.script)}</pre>` : `<p class="muted-sm">Esta parte ainda é apenas uma ideia salva. Clique em <em>Editar na Fábrica</em> para gerar o roteiro completo.</p>`}
-                    <div class="ep-preview-actions">
-                      ${ep.script ? `<button type="button" class="btn btn-secondary btn-xs copy-ep-script-btn" data-id="${ep.id}">📋 Copiar Roteiro</button>` : ''}
-                      ${ep.caption ? `<button type="button" class="btn btn-secondary btn-xs copy-ep-caption-btn" data-id="${ep.id}">📋 Copiar Legenda</button>` : ''}
-                      ${(ep.script || ep.caption || ep.onScreenText) ? `<button type="button" class="btn btn-secondary btn-xs copy-ep-all-btn" data-id="${ep.id}">📋 Copiar Pacote Completo</button>` : ''}
-                      <button type="button" class="btn btn-primary btn-xs open-ep-btn" data-id="${ep.id}">✏️ Abrir na Fábrica</button>
-                    </div>
-                  </div>
-                ` : ''}
-              </div>
-            `;
-            }).join('') : `<p class="muted-sm">Nenhum episódio nesta pasta ainda.</p>`}
+            ${eps.length ? eps.map((ep) => renderEpisodeCardHtml(ep, series)).join('') : `<p class="muted-sm">Nenhum episódio nesta pasta ainda.</p>`}
           </div>
         ` : ''}
       </div>
@@ -2561,50 +2896,6 @@ function renderSeriesFolders() {
     });
   });
 
-  grid.querySelectorAll('.toggle-ep-preview-btn').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const epId = btn.dataset.id;
-      if (expandedEpisodeIds.has(epId)) {
-        expandedEpisodeIds.delete(epId);
-      } else {
-        expandedEpisodeIds.add(epId);
-      }
-      renderSeriesFolders();
-    });
-  });
-
-  grid.querySelectorAll('.copy-ep-script-btn').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      const ep = state.episodes.find((e) => e.id === btn.dataset.id);
-      if (!ep?.script) {
-        showToast('Este episódio ainda não possui roteiro gerado.', 'err');
-        return;
-      }
-      await copyText(ep.script);
-    });
-  });
-
-  grid.querySelectorAll('.copy-ep-caption-btn').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      const ep = state.episodes.find((e) => e.id === btn.dataset.id);
-      if (ep?.caption) await copyText(ep.caption);
-    });
-  });
-
-  grid.querySelectorAll('.copy-ep-all-btn').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      const ep = state.episodes.find((e) => e.id === btn.dataset.id);
-      if (!ep) return;
-      const parts = [
-        `PARTE ${ep.partNumber}: ${ep.title || ''}`,
-        ep.onScreenText ? `\nTEXTO NA TELA:\n${ep.onScreenText}` : '',
-        ep.script ? `\nROTEIRO:\n${ep.script}` : '',
-        ep.caption ? `\nLEGENDA:\n${ep.caption}` : ''
-      ].filter(Boolean).join('\n');
-      await copyText(parts);
-    });
-  });
-
   grid.querySelectorAll('.create-next-part-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
       document.getElementById('f_seriesSelect').value = btn.dataset.id;
@@ -2621,37 +2912,22 @@ function renderSeriesFolders() {
       const sId = btn.dataset.id;
       if (!confirm(`Excluir a pasta "${btn.dataset.name}" e todos os seus episódios?`)) return;
       expandedSeriesIds.delete(sId);
-      state.episodes.filter((e) => e.seriesId === sId).forEach((e) => expandedEpisodeIds.delete(e.id));
+      state.episodes.filter((e) => e.seriesId === sId).forEach((e) => {
+        expandedEpisodeIds.delete(e.id);
+        openMoveEpisodeIds.delete(e.id);
+      });
       state.series = state.series.filter((s) => s.id !== sId);
       state.episodes = state.episodes.filter((e) => e.seriesId !== sId);
       await persist();
       renderFactorySeriesSelect();
       renderSeriesPartsStrip();
       renderSeriesFolders();
+      renderUnfiledEpisodes();
       showToast('Pasta excluída.', 'ok');
     });
   });
 
-  grid.querySelectorAll('.open-ep-btn').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const ep = state.episodes.find((e) => e.id === btn.dataset.id);
-      if (ep) {
-        loadEpisodeIntoFactory(ep);
-        switchTab('tab-factory');
-      }
-    });
-  });
-
-  grid.querySelectorAll('.del-ep-btn').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      expandedEpisodeIds.delete(btn.dataset.id);
-      state.episodes = state.episodes.filter((e) => e.id !== btn.dataset.id);
-      await persist();
-      renderSeriesPartsStrip();
-      renderSeriesFolders();
-      showToast('Episódio removido.', 'ok');
-    });
-  });
+  bindEpisodeCardEvents(grid, series);
 }
 
 function renderCatalog() {

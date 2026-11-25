@@ -178,6 +178,29 @@ export async function listAvailableApiModels(apiKey) {
   return discoveredModelsCache.categorized || { gemini4: [], gemini3: [], image: [], other: [] };
 }
 
+export const GEMINI_RETRY_CONFIG = {
+  maxAttempts: 10,
+  baseDelayMs: 1500,
+  maxDelayMs: 10000
+};
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function computeRetryDelayMs(attempt, retryAfterHeader = null) {
+  const { baseDelayMs, maxDelayMs } = GEMINI_RETRY_CONFIG;
+  if (retryAfterHeader !== null && retryAfterHeader !== undefined && retryAfterHeader !== '') {
+    const secs = Number(retryAfterHeader);
+    if (!Number.isNaN(secs) && secs > 0) {
+      return Math.min(maxDelayMs, Math.max(400, Math.round(secs * 1000)));
+    }
+  }
+  const exp = Math.min(maxDelayMs, Math.round(baseDelayMs * Math.pow(1.55, Math.max(0, attempt - 1))));
+  const jittered = Math.round(exp * (0.85 + Math.random() * 0.3));
+  return Math.min(maxDelayMs, Math.max(0, jittered));
+}
+
 async function callGemini({ apiKey, modelName = 'gemini-4-hydrogen', prompt, systemInstruction = '', useSearch = false, expectJson = true, onStatus = null }) {
   if (!apiKey) {
     throw new Error('NO_API_KEY');
@@ -185,81 +208,187 @@ async function callGemini({ apiKey, modelName = 'gemini-4-hydrogen', prompt, sys
 
   const model = resolveSelectedModel(modelName);
   const modelLabel = formatModelDisplayName(model);
+  const maxAttempts = Math.max(1, Number(GEMINI_RETRY_CONFIG.maxAttempts) || 10);
+  let lastError = null;
 
-  if (typeof onStatus === 'function') {
-    onStatus(modelLabel);
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (typeof onStatus === 'function') {
+      onStatus(attempt === 1 ? modelLabel : `${modelLabel} · Alta demanda, insistindo...`);
+    }
+
+    try {
+      const body = {
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: 0.78
+        }
+      };
+
+      if (systemInstruction) {
+        body.systemInstruction = { parts: [{ text: systemInstruction }] };
+      }
+      if (useSearch) {
+        body.tools = [{ googleSearch: {} }];
+      } else if (expectJson) {
+        body.generationConfig.responseMimeType = 'application/json';
+      }
+
+      const res = await fetchWithTimeout(`${BASE_URL}/${model}:generateContent?key=${encodeURIComponent(apiKey)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      }, REQUEST_TIMEOUT_MS);
+
+      const data = await res.json();
+      if (!res.ok) {
+        const msg = data?.error?.message || `HTTP ${res.status}`;
+        if (isInvalidKeyError(res.status, msg)) {
+          throw Object.assign(new Error(`${modelLabel}: ${msg}`), { fatal: true });
+        }
+
+        const isTransient = res.status === 429 || res.status >= 500 ||
+          /high demand|overloaded|unavailable|try again|temporarily|quota|rate limit|resource_exhausted|busy|capacity/i.test(msg);
+        lastError = Object.assign(new Error(`${modelLabel}: ${msg}`), { transient: isTransient });
+
+        if (isTransient && attempt < maxAttempts) {
+          const retryAfter = res.headers?.get?.('retry-after');
+          await sleep(computeRetryDelayMs(attempt, retryAfter));
+          continue;
+        }
+        throw lastError;
+      }
+
+      const candidate = data?.candidates?.[0];
+      const text = (candidate?.content?.parts || []).map((p) => p.text || '').join('\n').trim();
+      if (!text) {
+        lastError = Object.assign(new Error(`${modelLabel}: Resposta vazia do modelo.`), { transient: true });
+        if (attempt < maxAttempts) {
+          await sleep(computeRetryDelayMs(attempt));
+          continue;
+        }
+        throw lastError;
+      }
+
+      const groundingChunks = candidate?.groundingMetadata?.groundingChunks || [];
+      const sources = groundingChunks
+        .map((c) => c?.web ? { title: c.web.title, uri: c.web.uri } : null)
+        .filter(Boolean);
+
+      return { text, modelUsed: model, sources };
+    } catch (err) {
+      if (err?.fatal) throw err;
+      const baseMsg = String(err?.message || 'Erro ao conectar com a API do Google Gemini.');
+      const formattedMsg = baseMsg.startsWith(modelLabel) ? baseMsg : `${modelLabel}: ${baseMsg}`;
+      const isTransient = Boolean(err?.transient) || isTransientServiceError(err);
+      lastError = Object.assign(new Error(formattedMsg), { transient: isTransient });
+
+      if (isTransient && attempt < maxAttempts) {
+        await sleep(computeRetryDelayMs(attempt));
+        continue;
+      }
+      throw lastError;
+    }
   }
 
-  try {
-    const body = {
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: {
-        temperature: 0.78
-      }
-    };
-
-    if (systemInstruction) {
-      body.systemInstruction = { parts: [{ text: systemInstruction }] };
-    }
-    if (useSearch) {
-      body.tools = [{ googleSearch: {} }];
-    } else if (expectJson) {
-      body.generationConfig.responseMimeType = 'application/json';
-    }
-
-    const res = await fetchWithTimeout(`${BASE_URL}/${model}:generateContent?key=${encodeURIComponent(apiKey)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    }, REQUEST_TIMEOUT_MS);
-
-    const data = await res.json();
-    if (!res.ok) {
-      const msg = data?.error?.message || `HTTP ${res.status}`;
-      if (isInvalidKeyError(res.status, msg)) {
-        throw Object.assign(new Error(`${modelLabel}: ${msg}`), { fatal: true });
-      }
-      throw Object.assign(new Error(`${modelLabel}: ${msg}`), {
-        transient: res.status === 503 || res.status === 429 || res.status >= 500 ||
-          /high demand|overloaded|unavailable|try again|temporarily|quota|rate limit|resource_exhausted/i.test(msg)
-      });
-    }
-
-    const candidate = data?.candidates?.[0];
-    const text = (candidate?.content?.parts || []).map((p) => p.text || '').join('\n').trim();
-    if (!text) {
-      throw new Error(`${modelLabel}: Resposta vazia do modelo.`);
-    }
-    const groundingChunks = candidate?.groundingMetadata?.groundingChunks || [];
-    const sources = groundingChunks
-      .map((c) => c?.web ? { title: c.web.title, uri: c.web.uri } : null)
-      .filter(Boolean);
-
-    return { text, modelUsed: model, sources };
-  } catch (err) {
-    if (err?.fatal) throw err;
-    const baseMsg = String(err?.message || 'Erro ao conectar com a API do Google Gemini.');
-    const formattedMsg = baseMsg.startsWith(modelLabel) ? baseMsg : `${modelLabel}: ${baseMsg}`;
-    throw Object.assign(new Error(formattedMsg), {
-      transient: Boolean(err?.transient) || isTransientServiceError(err)
-    });
-  }
+  throw lastError || new Error(`${modelLabel}: Erro ao conectar com a API do Google Gemini.`);
 }
 
 // ============================================================================
 // 1. GERADOR DE EPISÓDIO COMPLETO (ROTEIRO + HEADLINE + LEGENDA + EDIÇÃO IA)
 // ============================================================================
 
+function extractArticleFromHtml(html = '') {
+  const src = String(html || '');
+  if (!src.trim()) return { title: '', excerpt: '' };
+  const titleMatch = src.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  const metaMatch = src.match(/<meta[^>]+(?:name=["']description["']|property=["']og:description["'])[^>]+content=["']([\s\S]*?)["']/i);
+  const cleanedBody = src
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ');
+  const paragraphs = [];
+  const pRegex = /<p[^>]*>([\s\S]*?)<\/p>/gi;
+  let pm;
+  while ((pm = pRegex.exec(cleanedBody)) !== null && paragraphs.length < 16) {
+    const text = decodeXmlEntities(pm[1]);
+    if (text.length >= 45) paragraphs.push(text);
+  }
+  const excerpt = [metaMatch ? decodeXmlEntities(metaMatch[1]) : '', ...paragraphs]
+    .filter(Boolean)
+    .join('\n')
+    .slice(0, 2400);
+  return {
+    title: titleMatch ? decodeXmlEntities(titleMatch[1]) : '',
+    excerpt
+  };
+}
+
+export async function fetchNewsArticleContext({ url = '', driveWebhookUrl = '' } = {}) {
+  const targetUrl = String(url || '').trim();
+  if (!targetUrl || (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://'))) {
+    return null;
+  }
+
+  if (driveWebhookUrl) {
+    try {
+      const res = await fetchWithTimeout(driveWebhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ action: 'fetch_article', url: targetUrl })
+      }, 8000);
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.ok && data?.excerpt) {
+          return {
+            title: data.title || '',
+            excerpt: String(data.excerpt).slice(0, 2400),
+            finalUrl: data.finalUrl || targetUrl,
+            via: 'Apps Script'
+          };
+        }
+      }
+    } catch {
+      // Fallback para relays do navegador
+    }
+  }
+
+  const encoded = encodeURIComponent(targetUrl);
+  try {
+    return await raceFirstNonEmpty([
+      (async () => {
+        const res = await fetchWithTimeout(`https://api.allorigins.win/get?url=${encoded}`, { method: 'GET' }, 7500);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const extracted = extractArticleFromHtml(data?.contents || '');
+        if (!extracted.excerpt) throw new Error('empty');
+        return { ...extracted, finalUrl: targetUrl, via: 'AllOrigins' };
+      })(),
+      (async () => {
+        const res = await fetchWithTimeout(`https://api.codetabs.com/v1/proxy?quest=${encoded}`, { method: 'GET' }, 7500);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const html = await res.text();
+        const extracted = extractArticleFromHtml(html);
+        if (!extracted.excerpt) throw new Error('empty');
+        return { ...extracted, finalUrl: targetUrl, via: 'CodeTabs' };
+      })()
+    ]);
+  } catch {
+    return null;
+  }
+}
+
 export async function generateCompleteEpisode(params) {
   const {
     creator,
     modelId,
-    seriesName,
-    partNumber = 1,
+    seriesName = '',
+    partNumber = null,
     topic,
     funnelStage = 'topo',
     viralGoal = 'share',
     validation = {},
+    sourceNews = null,
+    driveWebhookUrl = '',
     apiKey,
     modelName,
     onStatus = null
@@ -268,15 +397,39 @@ export async function generateCompleteEpisode(params) {
   const modelObj = SERIES_MODELS.find((m) => m.id === modelId) || SERIES_MODELS[0];
   const funnelObj = VIRAL_CODE.funnelStages.find((f) => f.id === funnelStage) || VIRAL_CODE.funnelStages[0];
   const hierarchyObj = VIRAL_CODE.hierarchies.find((h) => h.id === viralGoal) || VIRAL_CODE.hierarchies[0];
+  const cleanSeries = String(seriesName || '').trim();
+  const hasSeries = Boolean(cleanSeries);
+  const validPart = Number(partNumber) >= 1 ? Number(partNumber) : null;
 
   if (!apiKey) {
-    return buildOfflineEpisode({ creator, modelObj, seriesName, partNumber, topic, funnelObj, hierarchyObj, validation });
+    return buildOfflineEpisode({ creator, modelObj, seriesName: cleanSeries, partNumber: validPart, topic, funnelObj, hierarchyObj, validation, sourceNews });
   }
+
+  let articleContext = null;
+  if (sourceNews?.url) {
+    if (typeof onStatus === 'function') onStatus('Lendo notícia anexada...');
+    articleContext = await fetchNewsArticleContext({ url: sourceNews.url, driveWebhookUrl });
+  }
+
+  const hasNews = Boolean(sourceNews?.url || sourceNews?.title);
+  const newsBlock = hasNews ? `
+
+NOTÍCIA REAL ANEXADA (REFERÊNCIA FACTUAL OBRIGATÓRIA):
+- Título da matéria: ${articleContext?.title || sourceNews?.title || 'Notícia anexada'}
+- Veículo: ${sourceNews?.sourceName || 'Portal de notícias'} | Data: ${sourceNews?.publishedAt || 'Recente'}
+- Link oficial: ${sourceNews?.url || 'Não informado'}
+${sourceNews?.summary ? `- Resumo inicial: ${sourceNews.summary}` : ''}
+${articleContext?.excerpt ? `- Trecho real extraído da notícia:\n${articleContext.excerpt}` : ''}
+REGRA FACTUAL: Use as informações reais, fatos, contexto e números dessa notícia para fundamentar o roteiro com precisão, sem inventar dados que contradigam a matéria.` : '';
+
+  const seriesRule = hasSeries
+    ? `- Este vídeo pertence à SÉRIE "${cleanSeries}"${validPart ? ` (Parte ${validPart})` : ''}.`
+    : `- Este vídeo ainda está SEM PASTA/SÉRIE definida (roteiro avulso para ser encaixado depois) — portanto NÃO invente "Parte 1" nem texto artificial de numeração.`;
 
   const systemInstruction = `Você é o Diretor Criativo do "Reels Lab", especialista supremo nos dois métodos:
 1. "O Meu Modelo de Reels" (Leislin Eduarda):
-- Todo vídeo pertence a uma SÉRIE numerada (Parte ${partNumber}).
-- REGRA DE OURO DO COMEÇO: A primeira frase falada É LITERALMENTE o nome da série/gancho. PROIBIDO cumprimentar ("oi gente", "tudo bem", "olá pessoal"), PROIBIDO se apresentar, PROIBIDO dizer "hoje eu vim falar de".
+${seriesRule}
+- REGRA DE OURO DO COMEÇO: A primeira frase falada É LITERALMENTE o gancho/título forte do vídeo. PROIBIDO cumprimentar ("oi gente", "tudo bem", "olá pessoal"), PROIBIDO se apresentar, PROIBIDO dizer "hoje eu vim falar de".
 - TESTE DA CONVERSA: Escreva como quem conversa com uma amiga no WhatsApp/café. Zero linguagem acadêmica ou de seminário. Respeite o pronome (${creator?.pronoun || 'você'}) e nunca use as palavras proibidas.
 - DURAÇÃO: Máximo 1 minuto (~110 a 145 palavras no total; se Topo/Descoberta <30s, ~65 a 85 palavras).
 - 1 ÚNICA ORIENTAÇÃO por vídeo: resolva um único problema concreto.
@@ -293,7 +446,7 @@ export async function generateCompleteEpisode(params) {
 ${buildCreatorContext(creator)}
 
 PARÂMETROS DO EPISÓDIO:
-- Série: "${seriesName}" (Parte ${partNumber})
+- Série / Pasta: ${hasSeries ? `"${cleanSeries}"${validPart ? ` (Parte ${validPart})` : ''}` : 'Sem pasta definida ainda (Roteiro avulso)'}
 - Modelo Escolhido: ${modelObj.code} — "${modelObj.name}"
   Regra de título deste modelo: ${modelObj.nameRule}
   Fluxo obrigatório do roteiro: ${modelObj.structureFlow}
@@ -301,12 +454,12 @@ PARÂMETROS DO EPISÓDIO:
 - Tema / Situação deste episódio: ${topic || 'Escolha uma dor específica de alto impacto do público do criador'}
 - Etapa do Funil: ${funnelObj.label} (${funnelObj.focus})
 - Objetivo Viral Principal: ${hierarchyObj.label} (${hierarchyObj.hint})
-- Pré-respostas do criador (se houver): Problema="${validation.problem || ''}", Aprendizado="${validation.learn || ''}", Mudança="${validation.lifeChange || ''}"
+- Pré-respostas do criador (se houver): Problema="${validation.problem || ''}", Aprendizado="${validation.learn || ''}", Mudança="${validation.lifeChange || ''}"${newsBlock}
 
 Retorne EXATAMENTE um JSON com esta estrutura:
 {
   "title": "Título curto e memorável do episódio",
-  "onScreenText": "Texto exato para colocar escrito acima da cabeça no início do vídeo (com Parte ${partNumber})",
+  "onScreenText": "${validPart ? `Texto exato para colocar escrito acima da cabeça no início do vídeo (com Parte ${validPart})` : 'Texto curto e direto para colocar escrito acima da cabeça no início do vídeo'}",
   "headlines": [
     "Headline Viral 1 para capa (curta, max 7 palavras, específica + curiosa + urgente)",
     "Headline Viral 2 (alternativa com palavra de curiosidade)",
@@ -326,10 +479,14 @@ Retorne EXATAMENTE um JSON com esta estrutura:
   try {
     const { text, modelUsed } = await callGemini({ apiKey, modelName, taskType: 'creative', prompt, systemInstruction, expectJson: true, onStatus });
     const parsed = cleanJsonResponse(text);
-    return { ...parsed, generatedBy: `IA (${modelUsed})` };
+    return {
+      ...parsed,
+      articleUsed: Boolean(articleContext?.excerpt),
+      generatedBy: `IA (${modelUsed})`
+    };
   } catch (err) {
     if (!err?.fatal && isTransientServiceError(err)) {
-      const offline = buildOfflineEpisode({ creator, modelObj, seriesName, partNumber, topic, funnelObj, hierarchyObj, validation });
+      const offline = buildOfflineEpisode({ creator, modelObj, seriesName: cleanSeries, partNumber: validPart, topic, funnelObj, hierarchyObj, validation, sourceNews });
       return {
         ...offline,
         generatedBy: 'Motor Inteligente de Contingência (Pico de demanda no Google Gemini)',
@@ -340,12 +497,15 @@ Retorne EXATAMENTE um JSON com esta estrutura:
   }
 }
 
-function buildOfflineEpisode({ creator, modelObj, seriesName, partNumber, topic, funnelObj, hierarchyObj, validation }) {
+function buildOfflineEpisode({ creator, modelObj, seriesName = '', partNumber = null, topic, funnelObj, hierarchyObj, validation, sourceNews = null }) {
   const pronoun = creator?.pronoun || 'você';
   const prefix = creator?.targetGroupPrefix || 'A pessoa que';
   const keyword = creator?.manychatKeyword || 'EUQUERO';
   const niche = creator?.niche || 'seu dia a dia';
   const cleanTopic = (topic || '').trim() || `quer melhorar em ${niche} sem complicação`;
+  const cleanSeries = String(seriesName || '').trim();
+  const partSuffix = partNumber ? ` (Parte ${partNumber})` : '';
+  const seriesLabel = cleanSeries ? `${cleanSeries}${partSuffix}` : cleanTopic.slice(0, 38);
 
   let hookLine = '';
   if (modelObj.id === 'serie_01') {
@@ -357,7 +517,7 @@ function buildOfflineEpisode({ creator, modelObj, seriesName, partNumber, topic,
       ? cleanTopic
       : `${prefix} ${cleanTopic} não deveria achar que isso é normal.`;
   } else if (modelObj.id === 'serie_04') {
-    hookLine = `${seriesName} (parte ${partNumber}). Faz desse jeito aqui: ${cleanTopic}.`;
+    hookLine = `${cleanSeries || cleanTopic}${partNumber ? ` (parte ${partNumber})` : ''}. Faz desse jeito aqui: ${cleanTopic}.`;
   } else if (modelObj.id === 'serie_05') {
     hookLine = cleanTopic.toLowerCase().startsWith('quem') ? cleanTopic : `Quem quer ${cleanTopic} deveria fazer isso aqui.`;
   } else {
@@ -370,13 +530,16 @@ function buildOfflineEpisode({ creator, modelObj, seriesName, partNumber, topic,
     ? `Manda esse vídeo no Direct de quem precisa destravar isso hoje.`
     : hierarchyObj.id === 'read_caption'
     ? `Eu deixei os 3 passos exatos escritos aqui na legenda — salva e lê agora.`
-    : `Salva esse vídeo para aplicar ainda hoje e segue para a parte ${Number(partNumber) + 1}.`;
+    : partNumber
+    ? `Salva esse vídeo para aplicar ainda hoje e segue para a parte ${Number(partNumber) + 1}.`
+    : `Salva esse vídeo para aplicar ainda hoje e me segue para os próximos conteúdos.`;
 
+  const newsRefLine = sourceNews?.title ? ` (Baseado na notícia: ${sourceNews.title})` : '';
   const script = `[00-03s | GANCHO + BENEFÍCIO]
 ${hookLine} E nos próximos segundos eu vou te mostrar exatamente o que ${pronoun} pode ajustar hoje para destravar isso.
 
 [03-18s | DESENVOLVIMENTO / IDENTIFICAÇÃO]
-Eu sei que na correria ${pronoun} tenta resolver tudo do jeito mais difícil, olha o que os outros fazem e acaba se frustrando porque parece que nada funciona na sua rotina real. Só que quando ${pronoun} continua repetindo esse mesmo hábito sem perceber, o resultado só atrasa.
+Eu sei que na correria ${pronoun} tenta resolver tudo do jeito mais difícil${newsRefLine}, olha o que os outros fazem e acaba se frustrando porque parece que nada funciona na sua rotina real. Só que quando ${pronoun} continua repetindo esse mesmo hábito sem perceber, o resultado só atrasa.
 
 [18-35s | SOLUÇÃO PRÁTICA — MOSTRE!]
 Eu, no seu lugar, faria assim — olha na prática: escolha um único ajuste simples ligado a ${cleanTopic} e aplique por 7 dias antes de querer mudar tudo de uma vez. Mostre na câmera ou no exemplo real como fica fácil quando tira a complicação.
@@ -386,11 +549,11 @@ Porque ${pronoun} pode ter certeza: não é falta de tempo nem de capacidade, é
 
   return {
     title: cleanTopic.slice(0, 70),
-    onScreenText: `${seriesName} • Parte ${partNumber}`,
+    onScreenText: cleanSeries ? `${cleanSeries}${partNumber ? ` • Parte ${partNumber}` : ''}` : cleanTopic.slice(0, 48),
     headlines: [
       `O SEGREDO: ${cleanTopic.slice(0, 34)} 🤯`,
       `ENTENDA por que isso trava você`,
-      `${seriesName.slice(0, 28)} (Parte ${partNumber})`
+      seriesLabel.slice(0, 38)
     ],
     validation: {
       problem: validation.problem || `Dificuldade cotidiana ligada a ${cleanTopic}.`,
@@ -398,8 +561,8 @@ Porque ${pronoun} pode ter certeza: não é falta de tempo nem de capacidade, é
       lifeChange: validation.lifeChange || `Mais clareza, consistência e resultado real sem complicar a rotina.`
     },
     script,
-    caption: `${hookLine}\n\nA maioria das pessoas acha que precisa de uma fórmula mirabolante para resolver isso, quando na verdade o segredo está no ajuste básico feito com consistência.\n\n📌 Resumo para salvar:\n1. Identifique o erro invisível da sua rotina.\n2. Aplique uma única ação prática ainda hoje.\n3. Acompanhe a evolução nas próximas partes desta série.\n\n${ctaLine}\n\n#${(creator?.niche || 'conteudo').split(' ')[0].toLowerCase().replace(/[^a-z0-9]/g, '')} #dicaspraticas #reelsviral`,
-    editingPrompt: `PROMPT DE EDIÇÃO (CAPCUT / EDITOR IA) — ${funnelObj.label}:\n1. [00-03s]: Sem cumprimento. Coloque título fixo no topo acima da cabeça: "${seriesName} (Parte ${partNumber})". Zoom-in leve (100% -> 112%) + som sutil de "pop".\n2. [03-35s]: Cortes secos removendo todas as pausas de respiração. Legenda dinâmica centralizada em fonte Bold branca com palavras-chave em amarelo (#FDE047).\n3. [18-35s]: Insira B-Roll / gravação mostrando a ação prática na tela enquanto narra.\n4. [Final]: Corte abrupto imediatamente após a última palavra da CTA (efeito "Porta na Cara" para aumentar loop e retenção).\n5. Música de fundo instrumental sutil em -24dB.`,
+    caption: `${hookLine}\n\nA maioria das pessoas acha que precisa de uma fórmula mirabolante para resolver isso, quando na verdade o segredo está no ajuste básico feito com consistência.\n\n📌 Resumo para salvar:\n1. Identifique o erro invisível da sua rotina.\n2. Aplique uma única ação prática ainda hoje.\n3. Acompanhe os próximos conteúdos aqui no perfil.\n\n${ctaLine}\n\n#${(creator?.niche || 'conteudo').split(' ')[0].toLowerCase().replace(/[^a-z0-9]/g, '')} #dicaspraticas #reelsviral`,
+    editingPrompt: `PROMPT DE EDIÇÃO (CAPCUT / EDITOR IA) — ${funnelObj.label}:\n1. [00-03s]: Sem cumprimento. Coloque título fixo no topo acima da cabeça: "${seriesLabel}". Zoom-in leve (100% -> 112%) + som sutil de "pop".\n2. [03-35s]: Cortes secos removendo todas as pausas de respiração. Legenda dinâmica centralizada em fonte Bold branca com palavras-chave em amarelo (#FDE047).\n3. [18-35s]: Insira B-Roll / gravação mostrando a ação prática na tela enquanto narra.\n4. [Final]: Corte abrupto imediatamente após a última palavra da CTA (efeito "Porta na Cara" para aumentar loop e retenção).\n5. Música de fundo instrumental sutil em -24dB.`,
     coverImagePrompt: `Foto vertical 9:16 estilo editorial de estúdio em ${creator?.niche || 'lifestyle'}, pessoa expressiva em ambiente natural bem iluminado, espaço limpo no terço superior/central para headline grande, cores vibrantes combinando com ${creator?.brandColor || '#EC4899'}.`,
     generatedBy: 'Motor Local (Adicione sua chave Gemini para IA generativa avançada)'
   };
@@ -1388,29 +1551,42 @@ export async function generateCoverBackground({ imagePrompt, apiKey }) {
   ];
 
   for (const m of imgModels) {
-    try {
-      const res = await fetchWithTimeout(`${BASE_URL}/${m}:generateContent?key=${encodeURIComponent(apiKey)}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{
-            role: 'user',
-            parts: [{ text: `Create a vertical 9:16 editorial background image without any text, letters, or watermarks: ${imagePrompt}` }]
-          }],
-          generationConfig: {
-            responseModalities: ['IMAGE', 'TEXT']
-          }
-        })
-      }, 30000);
-      if (!res.ok) continue;
-      const data = await res.json();
-      const parts = data?.candidates?.[0]?.content?.parts || [];
-      const imgPart = parts.find((p) => p.inlineData?.data);
-      if (imgPart) {
-        const mime = imgPart.inlineData.mimeType || 'image/png';
-        return `data:${mime};base64,${imgPart.inlineData.data}`;
+    for (let imgAttempt = 1; imgAttempt <= 2; imgAttempt++) {
+      try {
+        const res = await fetchWithTimeout(`${BASE_URL}/${m}:generateContent?key=${encodeURIComponent(apiKey)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{
+              role: 'user',
+              parts: [{ text: `Create a vertical 9:16 editorial background image without any text, letters, or watermarks: ${imagePrompt}` }]
+            }],
+            generationConfig: {
+              responseModalities: ['IMAGE', 'TEXT']
+            }
+          })
+        }, 30000);
+        if ((res.status === 503 || res.status === 429) && imgAttempt < 2) {
+          await sleep(Math.min(1500, GEMINI_RETRY_CONFIG.baseDelayMs));
+          continue;
+        }
+        if (!res.ok) break;
+        const data = await res.json();
+        const parts = data?.candidates?.[0]?.content?.parts || [];
+        const imgPart = parts.find((p) => p.inlineData?.data);
+        if (imgPart) {
+          const mime = imgPart.inlineData.mimeType || 'image/png';
+          return `data:${mime};base64,${imgPart.inlineData.data}`;
+        }
+        break;
+      } catch (_) {
+        if (imgAttempt < 2) {
+          await sleep(Math.min(1500, GEMINI_RETRY_CONFIG.baseDelayMs));
+          continue;
+        }
+        break;
       }
-    } catch (_) {}
+    }
   }
 
   throw new Error('Seu plano/região da chave Gemini não habilitou geração de imagem via API (Nano Banana) neste momento. Use o botão "Copiar Prompt" para gerar no app Gemini ou use os Fundos Estúdio / Upload de Foto aqui no app!');

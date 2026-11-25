@@ -165,7 +165,54 @@ function doPost(e) {
     var action = payload.action || 'sync';
 
     if (action === 'ping_news') {
-      return jsonResponse_({ ok: true, version: 'v9' });
+      return jsonResponse_({ ok: true, version: 'v11' });
+    }
+
+    if (action === 'fetch_article') {
+      var targetUrl = String(payload.url || '').trim();
+      if (targetUrl.indexOf('http://') !== 0 && targetUrl.indexOf('https://') !== 0) {
+        return jsonResponse_({ ok: false, error: 'URL inválida.' });
+      }
+      try {
+        var artRes = UrlFetchApp.fetch(targetUrl, {
+          muteHttpExceptions: true,
+          followRedirects: true,
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+          }
+        });
+        var artCode = artRes.getResponseCode();
+        if (artCode < 200 || artCode >= 300) {
+          return jsonResponse_({ ok: false, status: artCode, error: 'HTTP ' + artCode });
+        }
+        var html = artRes.getContentText('UTF-8');
+        var titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+        var metaMatch = html.match(/<meta[^>]+(?:name=["']description["']|property=["']og:description["'])[^>]+content=["']([\s\S]*?)["']/i);
+        var cleanedBody = html
+          .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+          .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+          .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ');
+        var paragraphs = [];
+        var pRegex = /<p[^>]*>([\s\S]*?)<\/p>/gi;
+        var pm;
+        while ((pm = pRegex.exec(cleanedBody)) !== null && paragraphs.length < 18) {
+          var text = decodeGasEntities_(pm[1]);
+          if (text.length >= 45) paragraphs.push(text);
+        }
+        var excerpt = [metaMatch ? decodeGasEntities_(metaMatch[1]) : '']
+          .concat(paragraphs)
+          .filter(Boolean)
+          .join('\n')
+          .slice(0, 2600);
+        return jsonResponse_({
+          ok: Boolean(excerpt),
+          title: titleMatch ? decodeGasEntities_(titleMatch[1]) : '',
+          excerpt: excerpt,
+          finalUrl: targetUrl
+        });
+      } catch (artErr) {
+        return jsonResponse_({ ok: false, error: String(artErr && artErr.message ? artErr.message : artErr) });
+      }
     }
 
     if (action === 'fetch_google_news' || action === 'fetch_trends') {
@@ -308,20 +355,24 @@ function doPost(e) {
 
         (state.episodes || []).forEach(function (ep) {
           var creator = creatorsMap[ep.creatorId];
-          var serie = seriesMap[ep.seriesId];
-          if (!creator || !serie) return;
+          var serie = ep.seriesId ? seriesMap[ep.seriesId] : null;
+          if (!creator) return;
 
           var creatorFolder = getOrCreateFolder_(root, creator.name || 'Criador');
-          var serieFolder = getOrCreateFolder_(creatorFolder, serie.name || 'Serie');
+          var serieFolder = serie
+            ? getOrCreateFolder_(creatorFolder, serie.name || 'Serie')
+            : getOrCreateFolder_(creatorFolder, 'Sem Pasta Definida (Avulsos)');
           var partPad = ('00' + (ep.partNumber || 1)).slice(-2);
-          var txtName = 'Parte_' + partPad + '_' + (ep.title || 'Roteiro').slice(0, 35).replace(/[\/\\:*?"<>|]/g, '-') + '.txt';
+          var txtPrefix = serie ? ('Parte_' + partPad + '_') : 'Avulso_';
+          var txtName = txtPrefix + (ep.title || 'Roteiro').slice(0, 35).replace(/[\/\\:*?"<>|]/g, '-') + '.txt';
 
           var txtBody = [
             'REELS LAB — EPISÓDIO SALVO',
             'Criador: ' + (creator.name || '') + ' (' + (creator.handle || '') + ')',
-            'Série: ' + (serie.name || ''),
-            'Parte: ' + (ep.partNumber || 1) + ' | Status: ' + (ep.status || 'Roteiro'),
+            'Série: ' + (serie ? serie.name : 'Sem pasta definida (Avulso)'),
+            'Parte: ' + (ep.partNumber || (serie ? 1 : 'Avulso')) + ' | Status: ' + (ep.status || 'Roteiro'),
             'Funil: ' + (ep.funnelStage || '') + ' | Objetivo Viral: ' + (ep.viralGoal || ''),
+            (ep.sourceNews && ep.sourceNews.url) ? ('Notícia Fonte: ' + ep.sourceNews.url) : '',
             '============================================================',
             'TEXTO NA TELA (ACIMA DA CABEÇA):',
             ep.onScreenText || '',
