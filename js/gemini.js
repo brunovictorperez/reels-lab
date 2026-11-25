@@ -115,50 +115,50 @@ export const MODEL_RATE_LIMIT_CATALOG = [
     id: 'gemini-4-hydrogen',
     name: 'Gemini 4 Hydrogen',
     tierLabel: 'Grátis & Pago',
-    free: { rpm: 15, tpm: 250000, rpd: 500 },
+    free: { rpm: 5, tpm: 250000, rpd: 20 },
     tier1: { rpm: 1000, tpm: 1000000, rpd: 10000 }
-  },
-  {
-    id: 'gemini-4-neon',
-    name: 'Gemini 4 Neon',
-    tierLabel: 'Fronteira (Pago)',
-    free: null,
-    tier1: { rpm: 150, tpm: 2000000, rpd: 10000 }
-  },
-  {
-    id: 'gemini-4-argon',
-    name: 'Gemini 4 Argon',
-    tierLabel: 'Raciocínio (Pago)',
-    free: null,
-    tier1: { rpm: 300, tpm: 1000000, rpd: 10000 }
-  },
-  {
-    id: 'gemini-4-carbon',
-    name: 'Gemini 4 Carbon',
-    tierLabel: 'Máximo (Pago)',
-    free: null,
-    tier1: { rpm: 100, tpm: 1000000, rpd: 5000 }
   },
   {
     id: 'gemini-3.8-flash',
     name: 'Gemini 3.8 Flash',
     tierLabel: 'Grátis & Pago',
-    free: { rpm: 10, tpm: 250000, rpd: 250 },
+    free: { rpm: 5, tpm: 250000, rpd: 20 },
     tier1: { rpm: 1000, tpm: 1000000, rpd: 10000 }
   },
   {
     id: 'gemini-3.6-flash',
     name: 'Gemini 3.6 Flash',
     tierLabel: 'Grátis & Pago',
-    free: { rpm: 15, tpm: 250000, rpd: 500 },
+    free: { rpm: 5, tpm: 250000, rpd: 20 },
     tier1: { rpm: 1000, tpm: 1000000, rpd: 10000 }
   },
   {
     id: 'gemini-3.5-flash-lite',
     name: 'Gemini 3.5 Flash-Lite',
     tierLabel: 'Alto Volume',
-    free: { rpm: 30, tpm: 250000, rpd: 1000 },
+    free: { rpm: 15, tpm: 250000, rpd: 500 },
     tier1: { rpm: 2000, tpm: 4000000, rpd: 20000 }
+  },
+  {
+    id: 'gemini-4-neon',
+    name: 'Gemini 4 Neon',
+    tierLabel: 'API Paga',
+    free: null,
+    tier1: { rpm: 150, tpm: 2000000, rpd: 10000 }
+  },
+  {
+    id: 'gemini-4-argon',
+    name: 'Gemini 4 Argon',
+    tierLabel: 'API Paga',
+    free: null,
+    tier1: { rpm: 300, tpm: 1000000, rpd: 10000 }
+  },
+  {
+    id: 'gemini-4-carbon',
+    name: 'Gemini 4 Carbon',
+    tierLabel: 'API Paga',
+    free: null,
+    tier1: { rpm: 100, tpm: 1000000, rpd: 5000 }
   }
 ];
 
@@ -270,6 +270,29 @@ export function isDailyQuotaErrorMessage(msg = '') {
   return /GenerateRequestsPerDay|RequestsPerDay|requests per day|per[\s_-]*day|\bRPD\b|daily limit|limit:\s*0|free_tier_requests.*limit:\s*0|exceeded your current quota/i.test(txt);
 }
 
+function extractReportedRpdLimit(errorData = null, msg = '') {
+  const details = Array.isArray(errorData?.error?.details) ? errorData.error.details : [];
+  for (const d of details) {
+    const violations = Array.isArray(d?.violations) ? d.violations : [];
+    for (const v of violations) {
+      const idStr = `${v?.quotaId || ''} ${v?.quotaMetric || ''}`;
+      if (/PerDay|RPD|daily/i.test(idStr) && v?.quotaValue !== undefined && v?.quotaValue !== null) {
+        const parsed = Number(v.quotaValue);
+        if (!Number.isNaN(parsed) && parsed >= 0) return parsed;
+      }
+    }
+  }
+  const msgStr = String(msg || '');
+  if (/PerDay|per[\s_-]*day|RPD|daily|free_tier_requests/i.test(msgStr)) {
+    const m = msgStr.match(/limit:\s*(\d+)/i);
+    if (m) {
+      const parsed = Number(m[1]);
+      if (!Number.isNaN(parsed) && parsed >= 0) return parsed;
+    }
+  }
+  return null;
+}
+
 export function recordModelApiEvent({
   model,
   status = 'ok',
@@ -279,6 +302,7 @@ export function recordModelApiEvent({
   errorMessage = '',
   retryAfterSec = 0,
   isDailyQuota = false,
+  reportedRpdLimit = null,
   nowMs = Date.now()
 } = {}) {
   const modelId = resolveSelectedModel(model || 'gemini-4-hydrogen');
@@ -313,6 +337,11 @@ export function recordModelApiEvent({
 
   entry.lastUsedAt = nowMs;
   entry.lastStatus = status;
+
+  if (typeof reportedRpdLimit === 'number' && !Number.isNaN(reportedRpdLimit) && reportedRpdLimit >= 0) {
+    entry.detectedRpdLimit = reportedRpdLimit;
+    entry.detectedRpdPtDay = ptDay;
+  }
 
   if (status === 'ok') {
     entry.lastError = '';
@@ -395,21 +424,26 @@ export function getRateLimitDashboard({
     const cooldownActive = Number(entry.cooldownUntil || 0) > nowMs;
     const paidOnlyOnFree = !useTier1 && !spec.free;
 
-    const rpmLimit = limits?.rpm ?? null;
-    const tpmLimit = limits?.tpm ?? null;
-    const rpdLimit = limits?.rpd ?? null;
-
-    const rpmRemaining = rpmLimit !== null ? Math.max(0, rpmLimit - rpmUsed) : null;
-    const tpmRemaining = tpmLimit !== null ? Math.max(0, tpmLimit - tpmUsed) : null;
-    const rpdRemaining = rpdLimit !== null
-      ? (dailyBlocked ? 0 : Math.max(0, rpdLimit - rpdUsed))
+    const reportedRpd = entry.detectedRpdPtDay === ptDay && typeof entry.detectedRpdLimit === 'number'
+      ? entry.detectedRpdLimit
       : null;
+
+    const rpmLimit = limits?.rpm ?? 0;
+    const tpmLimit = limits?.tpm ?? 0;
+    const rpdLimit = reportedRpd !== null ? reportedRpd : (limits?.rpd ?? 0);
+
+    const rpmRemaining = Math.max(0, rpmLimit - rpmUsed);
+    const tpmRemaining = Math.max(0, tpmLimit - tpmUsed);
+    const rpdExceededOnServer = dailyBlocked && rpdLimit > 0 && rpdUsed < rpdLimit;
+    const rpdDisplayUsed = rpdExceededOnServer ? rpdLimit : rpdUsed;
+    const rpdRemaining = dailyBlocked ? 0 : Math.max(0, rpdLimit - rpdUsed);
 
     const rpmPct = rpmLimit ? Math.min(100, Number(((rpmUsed / rpmLimit) * 100).toFixed(1))) : 0;
     const tpmPct = tpmLimit ? Math.min(100, Number(((tpmUsed / tpmLimit) * 100).toFixed(1))) : 0;
-    const rpdPct = rpdLimit
+    const rpdPct = rpdLimit > 0
       ? (dailyBlocked ? 100 : Math.min(100, Number(((rpdUsed / rpdLimit) * 100).toFixed(1))))
       : 0;
+    const isOverRpd = dailyBlocked || (rpdLimit > 0 && rpdUsed >= rpdLimit);
 
     const inApiKeyCatalog = availableSet ? availableSet.has(spec.id) : null;
 
@@ -454,6 +488,9 @@ export function getRateLimitDashboard({
       rpmUsed,
       tpmUsed,
       rpdUsed,
+      rpdDisplayUsed,
+      rpdExceededOnServer,
+      isOverRpd,
       rpmRemaining,
       tpmRemaining,
       rpdRemaining,
@@ -549,12 +586,14 @@ export async function probeModelAvailability({ apiKey, modelName = 'gemini-4-hyd
   const retryAfter = Number(res.headers?.get?.('retry-after') || 0);
   if (res.status === 429) {
     const daily = isDailyQuotaErrorMessage(msg);
+    const reportedRpdLimit = extractReportedRpdLimit(data, msg);
     recordModelApiEvent({
       model,
       status: 'rate_limited',
       errorMessage: msg,
       retryAfterSec: retryAfter,
-      isDailyQuota: daily
+      isDailyQuota: daily,
+      reportedRpdLimit
     });
     return {
       ok: false,
@@ -731,7 +770,8 @@ async function callGemini({ apiKey, modelName = 'gemini-4-hydrogen', prompt, sys
             status: 'rate_limited',
             errorMessage: msg,
             retryAfterSec: Number(retryAfter || 0),
-            isDailyQuota: true
+            isDailyQuota: true,
+            reportedRpdLimit: extractReportedRpdLimit(data, msg)
           });
           throw Object.assign(
             new Error(`${modelLabel}: Limite diário da API atingido (${msg}). Abra "Configurar IA → 📊 Limites & Uso" para acompanhar e trocar de motor.`),

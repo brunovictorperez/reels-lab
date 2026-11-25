@@ -822,7 +822,6 @@ async function refreshRateLimitDashboard({ syncApi = false } = {}) {
 
 function renderAiRateLimitTab() {
   const wrap = document.getElementById('rateLimitTableWrap');
-  const summaryEl = document.getElementById('rateLimitSummaryCards');
   const resetBadge = document.getElementById('rateLimitResetBadge');
   const updatedBadge = document.getElementById('rateLimitUpdatedBadge');
   const freeBtn = document.getElementById('rateLimitTierFreeBtn');
@@ -843,91 +842,37 @@ function renderAiRateLimitTab() {
 
   if (resetBadge) {
     const localClock = dashboard.reset.localResetTime ? ` (às ${dashboard.reset.localResetTime})` : '';
-    resetBadge.textContent = `⏰ Renovação em: ${dashboard.reset.label}${localClock}`;
+    resetBadge.textContent = `⏰ Renova em ${dashboard.reset.label}${localClock}`;
   }
   if (updatedBadge) {
     const nowStr = new Date(dashboard.updatedAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     updatedBadge.textContent = `Atualizado às ${nowStr}`;
   }
 
-  // Cards de resumo claros para o Motor Ativo (Cota Diária RPD + Janelas RPM e TPM)
-  if (summaryEl && dashboard.activeRow) {
-    const row = dashboard.activeRow;
-    const hasLimits = Boolean(row.limits);
-    const localClock = dashboard.reset.localResetTime ? `às ${dashboard.reset.localResetTime} · ` : '';
-
-    summaryEl.innerHTML = `
-      <div class="rl-summary-card rl-summary-rpd">
-        <div class="rl-summary-head">
-          <span class="rl-summary-title">📅 Cota Diária (RPD) · ${escapeHtml(row.name)}</span>
-          <span class="rl-status-pill ${escapeHtml(row.status)}">${escapeHtml(row.statusLabel)}</span>
-        </div>
-        ${hasLimits ? `
-          <div class="rl-kpi-grid">
-            <div class="rl-kpi"><span>Usado</span><strong>${formatBrInt(row.rpdUsed)}</strong></div>
-            <div class="rl-kpi"><span>Restante</span><strong>${formatBrInt(row.rpdRemaining)}</strong></div>
-            <div class="rl-kpi"><span>Limite</span><strong>${formatBrInt(row.rpdLimit)}</strong></div>
-            <div class="rl-kpi"><span>Consumo</span><strong>${formatBrPct(row.rpdPct)}</strong></div>
-          </div>
-          <div class="rl-bar-track rl-bar-lg"><div class="rl-bar-fill ${barColorClass(row.rpdPct)}" style="width:${row.rpdPct}%"></div></div>
-          <div class="rl-summary-foot">
-            <span>🔄 Renovação em: <strong>${escapeHtml(dashboard.reset.label)}</strong> (${localClock}00h PT)</span>
-            <span>${formatBrInt(row.tokensToday)} tokens hoje</span>
-          </div>
-        ` : `
-          <div class="muted-sm mt-8">Modelo exclusivo para <strong>API Paga (Tier 1)</strong>. Alterne o seletor acima para "API Paga (Tier 1)" para visualizar os limites pagos ou selecione um motor gratuito.</div>
-        `}
-      </div>
-
-      <div class="rl-summary-card">
-        <div class="rl-summary-head">
-          <span class="rl-summary-title">⚡ RPM (Janela 1 min)</span>
-          <span class="muted-xs">${row.windowResetSec > 0 ? `Libera em ~${row.windowResetSec}s` : 'Janela livre'}</span>
-        </div>
-        ${hasLimits ? `
-          <div class="rl-kpi-grid rl-kpi-3">
-            <div class="rl-kpi"><span>Usado</span><strong>${formatBrInt(row.rpmUsed)}</strong></div>
-            <div class="rl-kpi"><span>Limite</span><strong>${formatBrInt(row.rpmLimit)}</strong></div>
-            <div class="rl-kpi"><span>Restante</span><strong>${formatBrInt(row.rpmRemaining)}</strong></div>
-          </div>
-          <div class="rl-bar-track rl-bar-lg"><div class="rl-bar-fill ${barColorClass(row.rpmPct)}" style="width:${row.rpmPct}%"></div></div>
-          <div class="rl-summary-foot"><span>Consumo atual: <strong>${formatBrPct(row.rpmPct)}</strong></span></div>
-        ` : `<div class="muted-sm mt-8">Usado na janela: <strong>${formatBrInt(row.rpmUsed)}</strong> (requer Tier 1)</div>`}
-      </div>
-
-      <div class="rl-summary-card">
-        <div class="rl-summary-head">
-          <span class="rl-summary-title">🧮 TPM (Tokens / 1 min)</span>
-          <span class="muted-xs">${row.windowResetSec > 0 ? `Libera em ~${row.windowResetSec}s` : 'Janela livre'}</span>
-        </div>
-        ${hasLimits ? `
-          <div class="rl-kpi-grid rl-kpi-3">
-            <div class="rl-kpi"><span>Usado</span><strong>${formatBrInt(row.tpmUsed)}</strong></div>
-            <div class="rl-kpi"><span>Limite</span><strong>${formatBrInt(row.tpmLimit)}</strong></div>
-            <div class="rl-kpi"><span>Restante</span><strong>${formatBrInt(row.tpmRemaining)}</strong></div>
-          </div>
-          <div class="rl-bar-track rl-bar-lg"><div class="rl-bar-fill ${barColorClass(row.tpmPct)}" style="width:${row.tpmPct}%"></div></div>
-          <div class="rl-summary-foot"><span>Consumo atual: <strong>${formatBrPct(row.tpmPct)}</strong></span></div>
-        ` : `<div class="muted-sm mt-8">Usado na janela: <strong>${formatBrInt(row.tpmUsed)}</strong> tokens</div>`}
-      </div>
-    `;
-  }
-
   wrap.innerHTML = `
-    <table class="rate-limit-table">
+    <table class="rate-limit-table rate-limit-table-simple">
       <thead>
         <tr>
           <th>Modelo</th>
-          <th>RPM (1 min)</th>
-          <th>TPM (1 min)</th>
-          <th>RPD (Hoje PT)</th>
-          <th>Status</th>
-          <th>Ações</th>
+          <th>RPD</th>
+          <th style="width:150px;text-align:right;">Ação</th>
         </tr>
       </thead>
       <tbody>
         ${dashboard.rows.map((row) => {
-          const hasLimits = Boolean(row.limits);
+          const limitNum = Number(row.rpdLimit) || 0;
+          const usedNum = Number(row.rpdDisplayUsed ?? row.rpdUsed) || 0;
+          const usedPrefix = row.rpdExceededOnServer ? '≥ ' : '';
+          const barPct = limitNum > 0
+            ? (row.isOverRpd ? 100 : (usedNum > 0 ? Math.max(8, row.rpdPct) : 0))
+            : 0;
+          const rpdText = `${usedPrefix}${formatBrInt(usedNum)} / ${formatBrInt(limitNum)}`;
+          const statusChip = row.dailyBlocked
+            ? `<span class="rl-status-pill blocked">Cota esgotada</span>`
+            : limitNum === 0
+              ? `<span class="rl-status-pill paid">Somente Pago</span>`
+              : '';
+
           return `
             <tr class="${row.isSelected ? 'rl-row-active' : ''}">
               <td>
@@ -935,41 +880,25 @@ function renderAiRateLimitTab() {
                   <div class="rl-model-name">
                     <span>${escapeHtml(row.name)}</span>
                     ${row.isSelected ? `<span class="badge-pill">✓ Em uso</span>` : ''}
+                    ${statusChip}
                   </div>
-                  <span class="muted-xs">${escapeHtml(row.id)} • ${escapeHtml(row.tierLabel)}${row.tokensToday ? ` • ${formatBrInt(row.tokensToday)} tokens hoje` : ''}</span>
-                  ${row.lastError ? `<span class="muted-xs" style="color:var(--red);">${escapeHtml(row.lastError)}</span>` : ''}
+                  <span class="muted-xs">${escapeHtml(row.id)}</span>
                 </div>
               </td>
               <td>
-                <div class="rl-metric">
-                  <span class="rl-metric-text">${hasLimits ? `${formatBrInt(row.rpmUsed)} / ${formatBrInt(row.rpmLimit)}` : `${formatBrInt(row.rpmUsed)} / Pago`}</span>
-                  <span class="rl-metric-sub">${hasLimits ? `Restante: ${formatBrInt(row.rpmRemaining)}` : 'Somente Tier 1'}</span>
-                  <div class="rl-bar-track"><div class="rl-bar-fill ${barColorClass(row.rpmPct)}" style="width:${hasLimits ? row.rpmPct : 0}%"></div></div>
+                <div class="rl-google-rpd" title="${row.dailyBlocked ? `Cota diária esgotada — renova em ${dashboard.reset.label}` : `Restante hoje (local): ${formatBrInt(row.rpdRemaining)}`}">
+                  <div class="rl-google-track">
+                    <div class="rl-google-fill ${row.isOverRpd ? 'over' : ''}" style="width:${barPct}%"></div>
+                  </div>
+                  <span class="rl-google-count ${row.isOverRpd ? 'over' : ''}">${rpdText}</span>
                 </div>
               </td>
-              <td>
-                <div class="rl-metric">
-                  <span class="rl-metric-text">${hasLimits ? `${formatBrInt(row.tpmUsed)} / ${formatBrInt(row.tpmLimit)}` : `${formatBrInt(row.tpmUsed)} / Pago`}</span>
-                  <span class="rl-metric-sub">${hasLimits ? `Restante: ${formatBrInt(row.tpmRemaining)}` : 'Somente Tier 1'}</span>
-                  <div class="rl-bar-track"><div class="rl-bar-fill ${barColorClass(row.tpmPct)}" style="width:${hasLimits ? row.tpmPct : 0}%"></div></div>
-                </div>
-              </td>
-              <td>
-                <div class="rl-metric">
-                  <span class="rl-metric-text">${hasLimits ? `${formatBrInt(row.rpdUsed)} / ${formatBrInt(row.rpdLimit)} (${formatBrPct(row.rpdPct)})` : `${formatBrInt(row.rpdUsed)} / Pago`}</span>
-                  <span class="rl-metric-sub">${hasLimits ? `Restante: ${formatBrInt(row.rpdRemaining)}` : 'Somente Tier 1'}</span>
-                  <div class="rl-bar-track"><div class="rl-bar-fill ${barColorClass(row.rpdPct)}" style="width:${hasLimits ? row.rpdPct : 0}%"></div></div>
-                </div>
-              </td>
-              <td>
-                <span class="rl-status-pill ${escapeHtml(row.status)}">${escapeHtml(row.statusLabel)}</span>
-              </td>
-              <td>
-                <div class="rl-actions-cell">
+              <td style="text-align:right;">
+                <div class="rl-actions-cell" style="justify-content:flex-end;">
                   <button type="button" class="btn btn-secondary btn-xs rl-probe-btn" data-model="${escapeHtml(row.id)}">⚡ Testar</button>
                   ${row.isSelected
                     ? `<span class="muted-xs" style="font-weight:700;">Ativo</span>`
-                    : `<button type="button" class="btn btn-primary btn-xs rl-use-btn" data-model="${escapeHtml(row.id)}">Usar motor</button>`}
+                    : `<button type="button" class="btn btn-primary btn-xs rl-use-btn" data-model="${escapeHtml(row.id)}">Usar</button>`}
                 </div>
               </td>
             </tr>

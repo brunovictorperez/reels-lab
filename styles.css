@@ -2432,6 +2432,54 @@ body { padding: 18px 22px; }
   word-break: break-word;
 }
 
+.rate-limit-table-simple {
+  min-width: 460px;
+}
+
+.rl-google-rpd {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 170px;
+}
+
+.rl-google-track {
+  width: 96px;
+  height: 9px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.28);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.rl-google-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: #4b5563;
+  transition: width 0.25s ease;
+}
+
+[data-theme="dark"] .rl-google-fill {
+  background: #d1d5db;
+}
+
+.rl-google-fill.over {
+  background: #dc2626;
+}
+
+.rl-google-count {
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.rl-google-count.over {
+  color: var(--red);
+  font-weight: 700;
+}
+
 @media (max-width: 900px) {
   .rl-summary-grid {
     grid-template-columns: 1fr;

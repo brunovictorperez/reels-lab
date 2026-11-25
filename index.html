@@ -1095,24 +1095,22 @@
         <div id="ai-tab-limits" class="subtab-panel">
           <div class="rate-limit-toolbar">
             <div class="inline-controls">
+              <a href="https://aistudio.google.com/rate-limit" target="_blank" rel="noopener noreferrer" class="btn btn-gradient btn-sm">↗ Abrir Rate Limit Real (AI Studio)</a>
               <span id="rateLimitResetBadge" class="badge-pill">⏰ Renovação em --</span>
               <span id="rateLimitUpdatedBadge" class="muted-xs"></span>
             </div>
             <div class="inline-controls">
               <div class="segmented-mini" title="Referência de limites do seu projeto no AI Studio">
-                <button type="button" id="rateLimitTierFreeBtn" class="seg-mini-btn active">Plano Grátis (Free)</button>
+                <button type="button" id="rateLimitTierFreeBtn" class="seg-mini-btn active">Plano Grátis</button>
                 <button type="button" id="rateLimitTierPaidBtn" class="seg-mini-btn">API Paga (Tier 1)</button>
               </div>
-              <button type="button" id="probeAllRateLimitBtn" class="btn btn-primary btn-xs">⚡ Testar Todos</button>
-              <a href="https://aistudio.google.com/rate-limit" target="_blank" rel="noopener noreferrer" class="btn btn-secondary btn-xs">↗ AI Studio</a>
-              <button type="button" id="resetRateLimitUsageBtn" class="btn btn-secondary btn-xs">↺ Zerar uso</button>
+              <button type="button" id="probeAllRateLimitBtn" class="btn btn-secondary btn-xs">⚡ Testar Todos</button>
+              <button type="button" id="resetRateLimitUsageBtn" class="btn btn-secondary btn-xs">↺ Zerar</button>
             </div>
           </div>
 
-          <div id="rateLimitSummaryCards" class="rl-summary-grid mt-12"></div>
-
           <div class="info-banner mt-12">
-            <strong>Telemetria em tempo real:</strong> este painel atualiza automaticamente sempre que você abre <strong>📊 Limites &amp; Uso (Rate Limit)</strong> e acompanha a janela móvel de 1 minuto (<strong>RPM</strong> e <strong>TPM</strong>) e a cota diária (<strong>RPD</strong>, que renova às 00h PT) com base nas chamadas reais deste aparelho e nos retornos da API do Google.
+            <strong>Por que pode haver diferença para o site do Google?</strong> A API pública do Gemini não fornece um endpoint com o contador acumulado de todos os seus aparelhos/sessões — aqui exibimos as chamadas feitas <strong>neste navegador</strong> + o status real retornado pela API (<code>200</code> / <code>429</code>). Para conferir o saldo oficial consolidado da sua conta Google, clique em <strong>↗ Abrir Rate Limit Real (AI Studio)</strong> acima.
           </div>
 
           <div id="rateLimitTableWrap" class="rate-limit-table-wrap mt-12"></div>
