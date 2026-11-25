@@ -913,38 +913,67 @@
   <!-- MODAL: CONFIGURAR IA GEMINI -->
   <div id="aiModal" class="modal hidden">
     <div class="modal-backdrop" data-close="aiModal"></div>
-    <div class="modal-card">
+    <div class="modal-card modal-lg">
       <div class="modal-header">
         <h3>Configurar <em class="serif-italic">Gemini AI</em></h3>
         <button class="icon-btn" data-close="aiModal">✕</button>
       </div>
       <div class="modal-body">
-        <p class="muted-sm">A chave fica salva <strong>somente na memória do seu navegador</strong> e conversa direto com a API oficial do Google.</p>
-        <div class="info-banner mt-12">
-          <strong>Como conseguir gratuitamente em 1 minuto:</strong><br/>
-          Acesse <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>, faça login com sua conta Google, clique em <em>Create API key</em> e cole abaixo.<br/>
-          <span class="muted-xs" style="display:inline-block;margin-top:4px;">💡 A assinatura <strong>Google AI Pro</strong> (site/app Gemini) é separada do faturamento da API, mas o modelo <strong>Gemini 4 Hydrogen</strong> já funciona no nível gratuito da chave AI Studio.</span>
+        <div class="subtabs mb-12" id="aiModalSubtabs">
+          <button type="button" id="aiTabConfigBtn" class="subtab active" data-subtab="ai-tab-config">⚙️ Chave &amp; Motor</button>
+          <button type="button" id="aiTabLimitsBtn" class="subtab" data-subtab="ai-tab-limits">📊 Limites &amp; Uso (Rate Limit)</button>
         </div>
-        <div class="form-group mt-12">
-          <label>Sua Gemini API Key</label>
-          <input type="password" id="m_geminiKey" class="input" placeholder="AIzaSy..." />
+
+        <div id="ai-tab-config" class="subtab-panel active">
+          <p class="muted-sm">A chave fica salva <strong>somente na memória do seu navegador</strong> e conversa direto com a API oficial do Google.</p>
+          <div class="info-banner mt-12">
+            <strong>Como conseguir gratuitamente em 1 minuto:</strong><br/>
+            Acesse <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>, faça login com sua conta Google, clique em <em>Create API key</em> e cole abaixo.<br/>
+            <span class="muted-xs" style="display:inline-block;margin-top:4px;">💡 A assinatura <strong>Google AI Pro</strong> (site/app Gemini) é separada do faturamento da API, mas o modelo <strong>Gemini 4 Hydrogen</strong> já funciona no nível gratuito da chave AI Studio.</span>
+          </div>
+          <div class="form-group mt-12">
+            <label>Sua Gemini API Key</label>
+            <input type="password" id="m_geminiKey" class="input" placeholder="AIzaSy..." />
+          </div>
+          <div class="form-group">
+            <label>Motor de IA Oficial (usado em todo o app)</label>
+            <select id="m_geminiModel" class="input">
+              <option value="gemini-4-hydrogen">Gemini 4 Hydrogen (Recomendado — Grátis &amp; Pago)</option>
+              <option value="gemini-4-neon">Gemini 4 Neon (Fronteira — API Paga)</option>
+              <option value="gemini-4-argon">Gemini 4 Argon (Raciocínio Eficiente — API Paga)</option>
+              <option value="gemini-4-carbon">Gemini 4 Carbon (Raciocínio Máximo — API Paga)</option>
+              <option value="gemini-3.8-flash">Gemini 3.8 Flash</option>
+              <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>
+              <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash-Lite</option>
+            </select>
+          </div>
+          <div class="inline-controls mt-8">
+            <button type="button" id="checkApiModelsBtn" class="btn btn-secondary btn-sm">🔍 Verificar Modelos na Minha Chave</button>
+          </div>
+          <div id="apiModelsResultBox" class="sub-card hidden mt-12"></div>
         </div>
-        <div class="form-group">
-          <label>Motor de IA Oficial (usado em todo o app)</label>
-          <select id="m_geminiModel" class="input">
-            <option value="gemini-4-hydrogen">Gemini 4 Hydrogen (Recomendado — Grátis &amp; Pago)</option>
-            <option value="gemini-4-neon">Gemini 4 Neon (Fronteira — API Paga)</option>
-            <option value="gemini-4-argon">Gemini 4 Argon (Raciocínio Eficiente — API Paga)</option>
-            <option value="gemini-4-carbon">Gemini 4 Carbon (Raciocínio Máximo — API Paga)</option>
-            <option value="gemini-3.8-flash">Gemini 3.8 Flash</option>
-            <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>
-            <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash-Lite</option>
-          </select>
+
+        <div id="ai-tab-limits" class="subtab-panel">
+          <div class="rate-limit-toolbar">
+            <div class="inline-controls">
+              <span id="rateLimitResetBadge" class="badge-pill">⏰ Renova em --</span>
+              <div class="segmented-mini" title="Referência de limites do seu projeto no AI Studio">
+                <button type="button" id="rateLimitTierFreeBtn" class="seg-mini-btn active">Plano Grátis (Free)</button>
+                <button type="button" id="rateLimitTierPaidBtn" class="seg-mini-btn">API Paga (Tier 1)</button>
+              </div>
+            </div>
+            <div class="inline-controls">
+              <a href="https://aistudio.google.com/rate-limit" target="_blank" rel="noopener noreferrer" class="btn btn-secondary btn-xs">↗ AI Studio Rate Limit</a>
+              <button type="button" id="resetRateLimitUsageBtn" class="btn btn-secondary btn-xs">↺ Zerar uso local</button>
+            </div>
+          </div>
+
+          <div class="info-banner mt-12">
+            <strong>Como este painel funciona:</strong> a API pública do Google não envia um endpoint com sua cota restante exata em tempo real; por isso o Reels Lab mede suas requisições reais deste aparelho (<strong>RPM</strong> no último minuto, <strong>TPM</strong> em tokens reais retornados pela API e <strong>RPD</strong> no dia do Pacífico — renova às 00h PT) mais os avisos reais de cota <code>429</code>. Para ver o consolidado do projeto em todos os apps, abra o link oficial do <strong>AI Studio Rate Limit</strong> acima.
+          </div>
+
+          <div id="rateLimitTableWrap" class="rate-limit-table-wrap mt-12"></div>
         </div>
-        <div class="inline-controls mt-8">
-          <button type="button" id="checkApiModelsBtn" class="btn btn-secondary btn-sm">🔍 Verificar Modelos na Minha Chave</button>
-        </div>
-        <div id="apiModelsResultBox" class="sub-card hidden mt-12"></div>
       </div>
       <div class="modal-footer">
         <button class="btn btn-secondary" data-close="aiModal">Fechar</button>

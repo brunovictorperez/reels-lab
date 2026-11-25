@@ -107,6 +107,384 @@ export function getOrchestratorQueue(modelName = 'gemini-4-hydrogen') {
   return [resolveSelectedModel(modelName)];
 }
 
+const RATE_LIMIT_STORAGE_KEY = 'reels_lab_api_usage_v1';
+let memoryRateLimitStore = { models: {} };
+
+export const MODEL_RATE_LIMIT_CATALOG = [
+  {
+    id: 'gemini-4-hydrogen',
+    name: 'Gemini 4 Hydrogen',
+    tierLabel: 'Grátis & Pago',
+    free: { rpm: 15, tpm: 250000, rpd: 500 },
+    tier1: { rpm: 1000, tpm: 1000000, rpd: 10000 }
+  },
+  {
+    id: 'gemini-4-neon',
+    name: 'Gemini 4 Neon',
+    tierLabel: 'Fronteira (Pago)',
+    free: null,
+    tier1: { rpm: 150, tpm: 2000000, rpd: 10000 }
+  },
+  {
+    id: 'gemini-4-argon',
+    name: 'Gemini 4 Argon',
+    tierLabel: 'Raciocínio (Pago)',
+    free: null,
+    tier1: { rpm: 300, tpm: 1000000, rpd: 10000 }
+  },
+  {
+    id: 'gemini-4-carbon',
+    name: 'Gemini 4 Carbon',
+    tierLabel: 'Máximo (Pago)',
+    free: null,
+    tier1: { rpm: 100, tpm: 1000000, rpd: 5000 }
+  },
+  {
+    id: 'gemini-3.8-flash',
+    name: 'Gemini 3.8 Flash',
+    tierLabel: 'Grátis & Pago',
+    free: { rpm: 10, tpm: 250000, rpd: 250 },
+    tier1: { rpm: 1000, tpm: 1000000, rpd: 10000 }
+  },
+  {
+    id: 'gemini-3.6-flash',
+    name: 'Gemini 3.6 Flash',
+    tierLabel: 'Grátis & Pago',
+    free: { rpm: 15, tpm: 250000, rpd: 500 },
+    tier1: { rpm: 1000, tpm: 1000000, rpd: 10000 }
+  },
+  {
+    id: 'gemini-3.5-flash-lite',
+    name: 'Gemini 3.5 Flash-Lite',
+    tierLabel: 'Alto Volume',
+    free: { rpm: 30, tpm: 250000, rpd: 1000 },
+    tier1: { rpm: 2000, tpm: 4000000, rpd: 20000 }
+  }
+];
+
+function readRateLimitStore() {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const raw = localStorage.getItem(RATE_LIMIT_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object' && parsed.models) {
+          memoryRateLimitStore = parsed;
+          return parsed;
+        }
+      }
+    }
+  } catch {
+    // Fallback em memória se localStorage estiver indisponível
+  }
+  if (!memoryRateLimitStore || typeof memoryRateLimitStore !== 'object' || !memoryRateLimitStore.models) {
+    memoryRateLimitStore = { models: {} };
+  }
+  return memoryRateLimitStore;
+}
+
+function writeRateLimitStore(store) {
+  memoryRateLimitStore = store;
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(RATE_LIMIT_STORAGE_KEY, JSON.stringify(store));
+    }
+  } catch {
+    // Ignora erro de quota do localStorage
+  }
+}
+
+export function getPacificDateKey(nowMs = Date.now()) {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Los_Angeles',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    }).formatToParts(new Date(nowMs));
+    const map = {};
+    parts.forEach((p) => { map[p.type] = p.value; });
+    if (map.year && map.month && map.day) {
+      return `${map.year}-${map.month}-${map.day}`;
+    }
+  } catch {
+    // Fallback UTC-8
+  }
+  return new Date(nowMs - (8 * 60 * 60 * 1000)).toISOString().slice(0, 10);
+}
+
+export function getTimeUntilPacificReset(nowMs = Date.now()) {
+  let hourPT = null;
+  let minutePT = null;
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Los_Angeles',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    }).formatToParts(new Date(nowMs));
+    const map = {};
+    parts.forEach((p) => { map[p.type] = p.value; });
+    const h = Number(map.hour);
+    const m = Number(map.minute);
+    if (!Number.isNaN(h) && !Number.isNaN(m)) {
+      hourPT = h === 24 ? 0 : h;
+      minutePT = m;
+    }
+  } catch {
+    // Fallback abaixo
+  }
+
+  if (hourPT === null || minutePT === null) {
+    const dt = new Date(nowMs - (8 * 60 * 60 * 1000));
+    hourPT = dt.getUTCHours();
+    minutePT = dt.getUTCMinutes();
+  }
+
+  const totalRemainingMin = Math.max(1, (24 * 60) - (hourPT * 60 + minutePT));
+  const hours = Math.floor(totalRemainingMin / 60);
+  const minutes = totalRemainingMin % 60;
+  return {
+    hours,
+    minutes,
+    label: `${hours}h ${String(minutes).padStart(2, '0')}m`
+  };
+}
+
+export function isDailyQuotaErrorMessage(msg = '') {
+  const txt = String(msg || '');
+  return /GenerateRequestsPerDay|RequestsPerDay|requests per day|per[\s_-]*day|\bRPD\b|daily limit|limit:\s*0|free_tier_requests.*limit:\s*0|exceeded your current quota/i.test(txt);
+}
+
+export function recordModelApiEvent({
+  model,
+  status = 'ok',
+  inputTokens = 0,
+  outputTokens = 0,
+  totalTokens = 0,
+  errorMessage = '',
+  retryAfterSec = 0,
+  isDailyQuota = false,
+  nowMs = Date.now()
+} = {}) {
+  const modelId = resolveSelectedModel(model || 'gemini-4-hydrogen');
+  const store = readRateLimitStore();
+  if (!store.models[modelId]) {
+    store.models[modelId] = { events: [] };
+  }
+  const entry = store.models[modelId];
+  const ptDay = getPacificDateKey(nowMs);
+  const cutoffMs = nowMs - (48 * 60 * 60 * 1000);
+
+  const inTok = Math.max(0, Number(inputTokens) || 0);
+  const totTok = Math.max(inTok + (Number(outputTokens) || 0), Number(totalTokens) || 0);
+
+  const existingEvents = Array.isArray(entry.events)
+    ? entry.events.filter((ev) => ev && ev.ts >= cutoffMs)
+    : [];
+
+  existingEvents.push({
+    ts: nowMs,
+    ptDay,
+    status,
+    inputTokens: inTok,
+    totalTokens: totTok
+  });
+
+  if (existingEvents.length > 500) {
+    entry.events = existingEvents.slice(-500);
+  } else {
+    entry.events = existingEvents;
+  }
+
+  entry.lastUsedAt = nowMs;
+  entry.lastStatus = status;
+
+  if (status === 'ok') {
+    entry.lastError = '';
+    entry.cooldownUntil = 0;
+    if (entry.dailyBlockedPtDay === ptDay) {
+      entry.dailyBlockedPtDay = '';
+    }
+  } else {
+    entry.lastError = String(errorMessage || '').slice(0, 220);
+    if (status === 'rate_limited') {
+      if (isDailyQuota) {
+        entry.dailyBlockedPtDay = ptDay;
+      } else {
+        const waitMs = Math.max(15000, (Number(retryAfterSec) || 60) * 1000);
+        entry.cooldownUntil = nowMs + waitMs;
+      }
+    }
+  }
+
+  writeRateLimitStore(store);
+  return entry;
+}
+
+export function clearRateLimitUsage() {
+  writeRateLimitStore({ models: {} });
+}
+
+export function getRateLimitDashboard({
+  selectedModel = 'gemini-4-hydrogen',
+  tier = 'free',
+  extraModels = [],
+  nowMs = Date.now()
+} = {}) {
+  const store = readRateLimitStore();
+  const ptDay = getPacificDateKey(nowMs);
+  const oneMinAgo = nowMs - 60000;
+  const reset = getTimeUntilPacificReset(nowMs);
+  const normalizedSelected = resolveSelectedModel(selectedModel);
+  const useTier1 = tier === 'tier1';
+
+  const catalogIds = new Set(MODEL_RATE_LIMIT_CATALOG.map((m) => m.id));
+  const extraIds = [...(extraModels || []), normalizedSelected]
+    .map((id) => resolveSelectedModel(id))
+    .filter((id) => id && !catalogIds.has(id));
+  const uniqueExtra = Array.from(new Set(extraIds));
+
+  const allModels = [
+    ...MODEL_RATE_LIMIT_CATALOG,
+    ...uniqueExtra.map((id) => ({
+      id,
+      name: formatModelDisplayName(id),
+      tierLabel: 'Personalizado / API',
+      free: { rpm: 15, tpm: 250000, rpd: 250 },
+      tier1: { rpm: 1000, tpm: 1000000, rpd: 10000 }
+    }))
+  ];
+
+  const rows = allModels.map((spec) => {
+    const entry = store.models?.[spec.id] || { events: [] };
+    const events = Array.isArray(entry.events) ? entry.events : [];
+    const lastMinEvents = events.filter((ev) => ev.ts >= oneMinAgo);
+    const todayEvents = events.filter((ev) => ev.ptDay === ptDay);
+
+    const rpmUsed = lastMinEvents.length;
+    const tpmUsed = lastMinEvents.reduce((sum, ev) => sum + (Number(ev.totalTokens) || 0), 0);
+    const rpdUsed = todayEvents.length;
+    const tokensToday = todayEvents.reduce((sum, ev) => sum + (Number(ev.totalTokens) || 0), 0);
+
+    const limits = useTier1 ? spec.tier1 : spec.free;
+    const dailyBlocked = entry.dailyBlockedPtDay === ptDay;
+    const cooldownActive = Number(entry.cooldownUntil || 0) > nowMs;
+    const paidOnlyOnFree = !useTier1 && !spec.free;
+
+    const rpmPct = limits?.rpm ? Math.min(100, Math.round((rpmUsed / limits.rpm) * 100)) : 0;
+    const tpmPct = limits?.tpm ? Math.min(100, Math.round((tpmUsed / limits.tpm) * 100)) : 0;
+    const rpdPct = limits?.rpd ? Math.min(100, Math.round((rpdUsed / limits.rpd) * 100)) : 0;
+
+    let status = 'ok';
+    let statusLabel = 'Disponível';
+    if (dailyBlocked) {
+      status = 'blocked';
+      statusLabel = `Cota diária esgotada (renova em ${reset.label})`;
+    } else if (cooldownActive) {
+      const waitSec = Math.max(1, Math.ceil((entry.cooldownUntil - nowMs) / 1000));
+      status = 'warn';
+      statusLabel = `Pausa RPM (${waitSec}s)`;
+    } else if (paidOnlyOnFree) {
+      status = 'paid';
+      statusLabel = 'Somente API Paga';
+    } else if (entry.lastStatus === 'high_demand' && (nowMs - (entry.lastUsedAt || 0)) < 5 * 60 * 1000) {
+      status = 'warn';
+      statusLabel = 'Alta demanda recente';
+    } else if (rpdPct >= 80 || rpmPct >= 80 || tpmPct >= 80) {
+      status = 'warn';
+      statusLabel = 'Perto do limite';
+    } else if (rpdUsed > 0) {
+      status = 'ok';
+      statusLabel = 'Ativo agora';
+    }
+
+    return {
+      id: spec.id,
+      name: spec.name,
+      tierLabel: spec.tierLabel,
+      isSelected: spec.id === normalizedSelected,
+      limits,
+      rpmUsed,
+      tpmUsed,
+      rpdUsed,
+      tokensToday,
+      rpmPct,
+      tpmPct,
+      rpdPct,
+      status,
+      statusLabel,
+      lastError: entry.lastError || '',
+      lastUsedAt: entry.lastUsedAt || 0
+    };
+  });
+
+  return {
+    ptDay,
+    tier: useTier1 ? 'tier1' : 'free',
+    reset,
+    rows
+  };
+}
+
+export async function probeModelAvailability({ apiKey, modelName = 'gemini-4-hydrogen' }) {
+  if (!apiKey) {
+    throw new Error('Cole e salve sua Gemini API Key antes de testar um modelo.');
+  }
+  const model = resolveSelectedModel(modelName);
+  const modelLabel = formatModelDisplayName(model);
+
+  const res = await fetchWithTimeout(`${BASE_URL}/${model}:generateContent?key=${encodeURIComponent(apiKey)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ role: 'user', parts: [{ text: 'ok' }] }],
+      generationConfig: { maxOutputTokens: 1, temperature: 0 }
+    })
+  }, 12000);
+
+  const data = await res.json();
+  if (res.ok) {
+    const usage = data?.usageMetadata || {};
+    recordModelApiEvent({
+      model,
+      status: 'ok',
+      inputTokens: usage.promptTokenCount || 0,
+      outputTokens: usage.candidatesTokenCount || 0,
+      totalTokens: usage.totalTokenCount || 0
+    });
+    return { ok: true, model, status: 'ok', message: `${modelLabel}: disponível e respondendo normalmente!` };
+  }
+
+  const msg = data?.error?.message || `HTTP ${res.status}`;
+  const retryAfter = Number(res.headers?.get?.('retry-after') || 0);
+  if (res.status === 429) {
+    const daily = isDailyQuotaErrorMessage(msg);
+    recordModelApiEvent({
+      model,
+      status: 'rate_limited',
+      errorMessage: msg,
+      retryAfterSec: retryAfter,
+      isDailyQuota: daily
+    });
+    return {
+      ok: false,
+      model,
+      status: 'rate_limited',
+      isDailyQuota: daily,
+      message: daily ? `${modelLabel}: Cota diária esgotada (${msg})` : `${modelLabel}: Limite por minuto atingido (${msg})`
+    };
+  }
+
+  if (res.status >= 500) {
+    recordModelApiEvent({ model, status: 'high_demand', errorMessage: msg });
+    return { ok: false, model, status: 'high_demand', message: `${modelLabel}: Alta demanda no Google (${msg})` };
+  }
+
+  recordModelApiEvent({ model, status: 'error', errorMessage: msg });
+  return { ok: false, model, status: 'error', message: `${modelLabel}: ${msg}` };
+}
+
 function scoreDiscoveredModel(name) {
   const n = String(name || '').toLowerCase();
   if (n === 'gemini-4-hydrogen') return 0;
@@ -248,10 +626,40 @@ async function callGemini({ apiKey, modelName = 'gemini-4-hydrogen', prompt, sys
 
         const isTransient = res.status === 429 || res.status >= 500 ||
           /high demand|overloaded|unavailable|try again|temporarily|quota|rate limit|resource_exhausted|busy|capacity/i.test(msg);
+        const retryAfter = res.headers?.get?.('retry-after');
+        const dailyQuotaHit = (res.status === 429 || /quota|resource_exhausted/i.test(msg)) && isDailyQuotaErrorMessage(msg);
+
+        if (dailyQuotaHit) {
+          recordModelApiEvent({
+            model,
+            status: 'rate_limited',
+            errorMessage: msg,
+            retryAfterSec: Number(retryAfter || 0),
+            isDailyQuota: true
+          });
+          throw Object.assign(
+            new Error(`${modelLabel}: Limite diário da API atingido (${msg}). Abra "Configurar IA → 📊 Limites & Uso" para acompanhar e trocar de motor.`),
+            { fatal: true }
+          );
+        }
+
+        if (res.status === 429) {
+          recordModelApiEvent({
+            model,
+            status: 'rate_limited',
+            errorMessage: msg,
+            retryAfterSec: Number(retryAfter || 0),
+            isDailyQuota: false
+          });
+        } else if (isTransient) {
+          recordModelApiEvent({ model, status: 'high_demand', errorMessage: msg });
+        } else {
+          recordModelApiEvent({ model, status: 'error', errorMessage: msg });
+        }
+
         lastError = Object.assign(new Error(`${modelLabel}: ${msg}`), { transient: isTransient });
 
         if (isTransient && attempt < maxAttempts) {
-          const retryAfter = res.headers?.get?.('retry-after');
           await sleep(computeRetryDelayMs(attempt, retryAfter));
           continue;
         }
@@ -268,6 +676,15 @@ async function callGemini({ apiKey, modelName = 'gemini-4-hydrogen', prompt, sys
         }
         throw lastError;
       }
+
+      const usageMeta = data?.usageMetadata || {};
+      recordModelApiEvent({
+        model,
+        status: 'ok',
+        inputTokens: usageMeta.promptTokenCount || 0,
+        outputTokens: usageMeta.candidatesTokenCount || 0,
+        totalTokens: usageMeta.totalTokenCount || 0
+      });
 
       const groundingChunks = candidate?.groundingMetadata?.groundingChunks || [];
       const sources = groundingChunks

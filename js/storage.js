@@ -25,6 +25,7 @@ export function createDefaultState() {
     settings: {
       geminiKey: '',
       geminiModel: 'gemini-4-hydrogen',
+      apiTier: 'free',
       theme: 'light',
       driveWebhookUrl: '',
       lastDriveSync: null,

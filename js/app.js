@@ -21,6 +21,9 @@ import {
 import {
   resolveSelectedModel,
   formatModelDisplayName,
+  getRateLimitDashboard,
+  clearRateLimitUsage,
+  probeModelAvailability,
   GOOGLE_NEWS_CATEGORIES,
   inferCreatorDefaultCategory,
   fetchGoogleNewsPortal,
@@ -286,12 +289,12 @@ function wireNavigation() {
     });
   });
 
-  // Scoped subtabs (so Factory and Library subtabs work independently)
+  // Scoped subtabs (so Factory, Library and AI Modal subtabs work independently)
   document.querySelectorAll('.subtab[data-subtab]').forEach((btn) => {
     btn.addEventListener('click', () => {
-      const parent = btn.closest('.tab-panel, .card');
+      const parent = btn.closest('.tab-panel, .card, .modal-card');
       const targetId = btn.dataset.subtab;
-      if (!targetId) return;
+      if (!parent || !targetId) return;
       parent.querySelectorAll('.subtab[data-subtab]').forEach((b) => b.classList.remove('active'));
       btn.classList.add('active');
       parent.querySelectorAll('.subtab-panel').forEach((p) => {
@@ -299,6 +302,8 @@ function wireNavigation() {
       });
       if (targetId === 'out-cover') {
         updateCoverPreview();
+      } else if (targetId === 'ai-tab-limits') {
+        renderAiRateLimitTab();
       }
     });
   });
@@ -415,7 +420,30 @@ function wireModals() {
     }
     modelSel.value = savedModel;
     document.getElementById('apiModelsResultBox').classList.add('hidden');
+    renderAiRateLimitTab();
     document.getElementById('aiModal').classList.remove('hidden');
+  });
+
+  document.getElementById('aiTabLimitsBtn').addEventListener('click', () => {
+    renderAiRateLimitTab();
+  });
+
+  document.getElementById('rateLimitTierFreeBtn').addEventListener('click', async () => {
+    state.settings.apiTier = 'free';
+    await persist();
+    renderAiRateLimitTab();
+  });
+
+  document.getElementById('rateLimitTierPaidBtn').addEventListener('click', async () => {
+    state.settings.apiTier = 'tier1';
+    await persist();
+    renderAiRateLimitTab();
+  });
+
+  document.getElementById('resetRateLimitUsageBtn').addEventListener('click', () => {
+    clearRateLimitUsage();
+    renderAiRateLimitTab();
+    showToast('Contadores locais de uso e limites zerados!', 'ok');
   });
 
   document.getElementById('checkApiModelsBtn').addEventListener('click', async () => {
@@ -632,6 +660,156 @@ function wireModals() {
     } catch {
       showToast('Abra o arquivo google-apps-script.gs na pasta do projeto para copiar.', 'err');
     }
+  });
+}
+
+function formatCompactCount(n = 0) {
+  const num = Number(n) || 0;
+  if (num >= 1000000) return `${(num / 1000000).toFixed(num >= 10000000 ? 0 : 1)}M`;
+  if (num >= 1000) return `${(num / 1000).toFixed(num >= 10000 ? 0 : 1)}K`;
+  return String(num);
+}
+
+function barColorClass(pct) {
+  if (pct >= 90) return 'danger';
+  if (pct >= 65) return 'warn';
+  return '';
+}
+
+function renderAiRateLimitTab() {
+  const wrap = document.getElementById('rateLimitTableWrap');
+  const resetBadge = document.getElementById('rateLimitResetBadge');
+  const freeBtn = document.getElementById('rateLimitTierFreeBtn');
+  const paidBtn = document.getElementById('rateLimitTierPaidBtn');
+  if (!wrap) return;
+
+  const tier = state?.settings?.apiTier === 'tier1' ? 'tier1' : 'free';
+  if (freeBtn) freeBtn.classList.toggle('active', tier === 'free');
+  if (paidBtn) paidBtn.classList.toggle('active', tier === 'tier1');
+
+  const extraModels = Array.from(document.getElementById('m_geminiModel')?.options || []).map((o) => o.value);
+  const dashboard = getRateLimitDashboard({
+    selectedModel: document.getElementById('m_geminiModel')?.value || state?.settings?.geminiModel,
+    tier,
+    extraModels
+  });
+
+  if (resetBadge) {
+    resetBadge.textContent = `⏰ Renova RPD em ${dashboard.reset.label} (Dia PT: ${dashboard.reset ? dashboard.ptDay : ''})`;
+  }
+
+  wrap.innerHTML = `
+    <table class="rate-limit-table">
+      <thead>
+        <tr>
+          <th>Modelo</th>
+          <th>RPM (1 min)</th>
+          <th>TPM (1 min)</th>
+          <th>RPD (Hoje PT)</th>
+          <th>Status</th>
+          <th>Ações</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${dashboard.rows.map((row) => {
+          const rpmMax = row.limits?.rpm;
+          const tpmMax = row.limits?.tpm;
+          const rpdMax = row.limits?.rpd;
+          const hasLimits = Boolean(row.limits);
+          return `
+            <tr class="${row.isSelected ? 'rl-row-active' : ''}">
+              <td>
+                <div class="rl-model-cell">
+                  <div class="rl-model-name">
+                    <span>${escapeHtml(row.name)}</span>
+                    ${row.isSelected ? `<span class="badge-pill">✓ Em uso</span>` : ''}
+                  </div>
+                  <span class="muted-xs">${escapeHtml(row.id)} • ${escapeHtml(row.tierLabel)}${row.tokensToday ? ` • ${formatCompactCount(row.tokensToday)} tokens hoje` : ''}</span>
+                  ${row.lastError ? `<span class="muted-xs" style="color:var(--red);">${escapeHtml(row.lastError)}</span>` : ''}
+                </div>
+              </td>
+              <td>
+                <div class="rl-metric">
+                  <span class="rl-metric-text">${hasLimits ? `${row.rpmUsed} / ${formatCompactCount(rpmMax)}` : `${row.rpmUsed} / Pago`}</span>
+                  <div class="rl-bar-track"><div class="rl-bar-fill ${barColorClass(row.rpmPct)}" style="width:${hasLimits ? row.rpmPct : 0}%"></div></div>
+                </div>
+              </td>
+              <td>
+                <div class="rl-metric">
+                  <span class="rl-metric-text">${hasLimits ? `${formatCompactCount(row.tpmUsed)} / ${formatCompactCount(tpmMax)}` : `${formatCompactCount(row.tpmUsed)} / Pago`}</span>
+                  <div class="rl-bar-track"><div class="rl-bar-fill ${barColorClass(row.tpmPct)}" style="width:${hasLimits ? row.tpmPct : 0}%"></div></div>
+                </div>
+              </td>
+              <td>
+                <div class="rl-metric">
+                  <span class="rl-metric-text">${hasLimits ? `${row.rpdUsed} / ${formatCompactCount(rpdMax)}` : `${row.rpdUsed} / Pago`}</span>
+                  <div class="rl-bar-track"><div class="rl-bar-fill ${barColorClass(row.rpdPct)}" style="width:${hasLimits ? row.rpdPct : 0}%"></div></div>
+                </div>
+              </td>
+              <td>
+                <span class="rl-status-pill ${escapeHtml(row.status)}">${escapeHtml(row.statusLabel)}</span>
+              </td>
+              <td>
+                <div class="rl-actions-cell">
+                  <button type="button" class="btn btn-secondary btn-xs rl-probe-btn" data-model="${escapeHtml(row.id)}">⚡ Testar</button>
+                  ${row.isSelected
+                    ? `<span class="muted-xs" style="font-weight:700;">Ativo</span>`
+                    : `<button type="button" class="btn btn-primary btn-xs rl-use-btn" data-model="${escapeHtml(row.id)}">Usar motor</button>`}
+                </div>
+              </td>
+            </tr>
+          `;
+        }).join('')}
+      </tbody>
+    </table>
+  `;
+
+  wrap.querySelectorAll('.rl-use-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const nextModel = btn.dataset.model;
+      const sel = document.getElementById('m_geminiModel');
+      if (sel) {
+        if (!Array.from(sel.options).some((o) => o.value === nextModel)) {
+          const opt = document.createElement('option');
+          opt.value = nextModel;
+          opt.textContent = formatModelDisplayName(nextModel);
+          sel.appendChild(opt);
+        }
+        sel.value = nextModel;
+      }
+      state.settings.geminiModel = nextModel;
+      await persist();
+      updateStatusIndicators();
+      renderAiRateLimitTab();
+      showToast(`Motor oficial alterado para ${formatModelDisplayName(nextModel)}!`, 'ok');
+    });
+  });
+
+  wrap.querySelectorAll('.rl-probe-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const targetModel = btn.dataset.model;
+      const key = document.getElementById('m_geminiKey')?.value.trim() || state.settings.geminiKey;
+      if (!key) {
+        showToast('Cole sua Gemini API Key na aba "⚙️ Chave & Motor" primeiro.', 'err');
+        return;
+      }
+      if (document.getElementById('m_geminiKey')?.value.trim()) {
+        state.settings.geminiKey = key;
+        await persist();
+      }
+      try {
+        const res = await runWithStatusTicker(
+          btn,
+          'Testando...',
+          () => probeModelAvailability({ apiKey: key, modelName: targetModel }),
+          { showModelName: false }
+        );
+        renderAiRateLimitTab();
+        showToast(res.message, res.ok ? 'ok' : 'err');
+      } catch (err) {
+        showToast(err.message, 'err');
+      }
+    });
   });
 }
 
