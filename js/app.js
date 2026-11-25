@@ -24,6 +24,8 @@ import {
   getRateLimitDashboard,
   clearRateLimitUsage,
   probeModelAvailability,
+  syncAvailableModelsForKey,
+  probeAllModelsAvailability,
   GOOGLE_NEWS_CATEGORIES,
   inferCreatorDefaultCategory,
   fetchGoogleNewsPortal,
@@ -43,6 +45,8 @@ import {
 } from './gemini.js';
 import {
   COVER_TEMPLATES,
+  COVER_FONTS,
+  getTemplateDefaultStyle,
   renderCoverCanvas,
   renderCleanCoverExport,
   saveCoverImage,
@@ -70,6 +74,21 @@ let activeRadarPortalMode = 'google';
 let activeXDayFilter = 'all';
 let xTrendsCache = { items: [], days: [], fetchedFrom: '', fetchedAt: '' };
 const selectedXTrendIds = new Set();
+
+// Rate Limit live auto-refresh state
+let rateLimitRefreshTimer = null;
+let cachedApiKeyModels = null;
+
+// Cover Studio advanced formatting state
+let coverGlobalStyle = getTemplateDefaultStyle('apple_light', '#8B5CF6');
+let coverBadgeStyle = {
+  color: coverGlobalStyle.badgeColor,
+  opacity: coverGlobalStyle.badgeOpacity,
+  textColor: coverGlobalStyle.badgeTextColor
+};
+let coverHeadlineSpans = [];
+let activeCoverSelection = null;
+let coverColorManuallyEdited = false;
 
 // Teleprompter state
 let tpInterval = null;
@@ -110,7 +129,15 @@ document.addEventListener('DOMContentLoaded', async () => {
       updateModelRuleHint();
     }
     renderSeriesPartsStrip();
+    renderCoverWordChips();
+    renderCoverSelectionPanel();
     await updateCoverPreview();
+  }
+
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(() => {
+      updateCoverPreview();
+    }).catch(() => {});
   }
 });
 
@@ -134,7 +161,9 @@ function applyTheme(theme) {
   }
   const tplSel = document.getElementById('cov_template');
   if (tplSel && (tplSel.value === 'apple_light' || tplSel.value === 'apple_dark')) {
-    tplSel.value = mode === 'dark' ? 'apple_dark' : 'apple_light';
+    const nextTpl = mode === 'dark' ? 'apple_dark' : 'apple_light';
+    tplSel.value = nextTpl;
+    applyCoverTemplateDefaults(nextTpl, { preserveSpans: true });
     updateCoverPreview();
   }
 }
@@ -264,7 +293,16 @@ function populateStaticSelects() {
   tplSel.innerHTML = COVER_TEMPLATES
     .map((t) => `<option value="${t.id}">${t.name}</option>`)
     .join('');
-  tplSel.value = (state?.settings?.theme || 'light') === 'dark' ? 'apple_dark' : 'apple_light';
+  const initialTpl = (state?.settings?.theme || 'light') === 'dark' ? 'apple_dark' : 'apple_light';
+  tplSel.value = initialTpl;
+
+  const fontSel = document.getElementById('cov_fontFamily');
+  if (fontSel) {
+    fontSel.innerHTML = COVER_FONTS
+      .map((f) => `<option value="${escapeHtml(f.id)}">${escapeHtml(f.label)}</option>`)
+      .join('');
+  }
+  applyCoverTemplateDefaults(initialTpl, { preserveSpans: false });
 
   // Pre-record Checklist in Tab 4
   document.getElementById('preRecordChecklist').innerHTML = VIRAL_CODE.preRecordChecklist
@@ -301,9 +339,12 @@ function wireNavigation() {
         p.classList.toggle('active', p.id === targetId);
       });
       if (targetId === 'out-cover') {
+        renderCoverWordChips();
         updateCoverPreview();
       } else if (targetId === 'ai-tab-limits') {
-        renderAiRateLimitTab();
+        refreshRateLimitDashboard({ syncApi: true });
+      } else if (targetId === 'ai-tab-config') {
+        stopRateLimitAutoRefresh();
       }
     });
   });
@@ -404,7 +445,11 @@ function updateMemoryStats() {
 function wireModals() {
   document.querySelectorAll('[data-close]').forEach((el) => {
     el.addEventListener('click', () => {
-      document.getElementById(el.dataset.close).classList.add('hidden');
+      const targetId = el.dataset.close;
+      document.getElementById(targetId).classList.add('hidden');
+      if (targetId === 'aiModal') {
+        stopRateLimitAutoRefresh();
+      }
     });
   });
 
@@ -420,12 +465,13 @@ function wireModals() {
     }
     modelSel.value = savedModel;
     document.getElementById('apiModelsResultBox').classList.add('hidden');
-    renderAiRateLimitTab();
     document.getElementById('aiModal').classList.remove('hidden');
-  });
-
-  document.getElementById('aiTabLimitsBtn').addEventListener('click', () => {
-    renderAiRateLimitTab();
+    const limitsActive = document.getElementById('ai-tab-limits')?.classList.contains('active');
+    if (limitsActive) {
+      refreshRateLimitDashboard({ syncApi: true });
+    } else {
+      renderAiRateLimitTab();
+    }
   });
 
   document.getElementById('rateLimitTierFreeBtn').addEventListener('click', async () => {
@@ -444,6 +490,51 @@ function wireModals() {
     clearRateLimitUsage();
     renderAiRateLimitTab();
     showToast('Contadores locais de uso e limites zerados!', 'ok');
+  });
+
+  document.getElementById('probeAllRateLimitBtn').addEventListener('click', async () => {
+    const key = document.getElementById('m_geminiKey')?.value.trim() || state.settings.geminiKey;
+    if (!key) {
+      showToast('Cole sua Gemini API Key na aba "⚙️ Chave & Motor" primeiro.', 'err');
+      return;
+    }
+    if (document.getElementById('m_geminiKey')?.value.trim()) {
+      state.settings.geminiKey = key;
+      await persist();
+    }
+    const btn = document.getElementById('probeAllRateLimitBtn');
+    const tier = state?.settings?.apiTier === 'tier1' ? 'tier1' : 'free';
+    const extraModels = Array.from(document.getElementById('m_geminiModel')?.options || []).map((o) => o.value);
+    const snap = getRateLimitDashboard({
+      selectedModel: document.getElementById('m_geminiModel')?.value || state?.settings?.geminiModel,
+      tier,
+      extraModels,
+      availableApiModels: cachedApiKeyModels
+    });
+    const targetModels = snap.rows
+      .filter((r) => tier === 'tier1' || Boolean(r.limits) || r.isSelected)
+      .map((r) => r.id);
+
+    try {
+      const results = await runWithStatusTicker(
+        btn,
+        'Testando motores...',
+        (onStatus) => probeAllModelsAvailability({
+          apiKey: key,
+          models: targetModels,
+          onProgress: ({ index, total, modelName }) => {
+            onStatus(`Testando ${index}/${total}: ${modelName}...`);
+            renderAiRateLimitTab();
+          }
+        }),
+        { showModelName: false }
+      );
+      renderAiRateLimitTab();
+      const okCount = results.filter((r) => r.ok).length;
+      showToast(`Verificação concluída: ${okCount}/${results.length} motor(es) respondendo normalmente.`, okCount > 0 ? 'ok' : 'err');
+    } catch (err) {
+      showToast(err.message, 'err');
+    }
   });
 
   document.getElementById('checkApiModelsBtn').addEventListener('click', async () => {
@@ -663,6 +754,15 @@ function wireModals() {
   });
 }
 
+function formatBrInt(n = 0) {
+  return Math.round(Number(n) || 0).toLocaleString('pt-BR');
+}
+
+function formatBrPct(pct = 0) {
+  const num = Number(pct) || 0;
+  return `${num.toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`;
+}
+
 function formatCompactCount(n = 0) {
   const num = Number(n) || 0;
   if (num >= 1000000) return `${(num / 1000000).toFixed(num >= 10000000 ? 0 : 1)}M`;
@@ -676,9 +776,55 @@ function barColorClass(pct) {
   return '';
 }
 
+function stopRateLimitAutoRefresh() {
+  if (rateLimitRefreshTimer) {
+    clearInterval(rateLimitRefreshTimer);
+    rateLimitRefreshTimer = null;
+  }
+}
+
+function startRateLimitAutoRefresh() {
+  stopRateLimitAutoRefresh();
+  rateLimitRefreshTimer = setInterval(() => {
+    const modal = document.getElementById('aiModal');
+    const limitsTab = document.getElementById('ai-tab-limits');
+    if (!modal || modal.classList.contains('hidden') || !limitsTab?.classList.contains('active')) {
+      stopRateLimitAutoRefresh();
+      return;
+    }
+    renderAiRateLimitTab();
+  }, 5000);
+}
+
+async function refreshRateLimitDashboard({ syncApi = false } = {}) {
+  renderAiRateLimitTab();
+  startRateLimitAutoRefresh();
+
+  if (!syncApi) return;
+  const key = document.getElementById('m_geminiKey')?.value.trim() || state?.settings?.geminiKey;
+  if (!key) return;
+
+  const updatedBadge = document.getElementById('rateLimitUpdatedBadge');
+  if (updatedBadge) {
+    updatedBadge.innerHTML = `<span class="ai-loading-inline"><span class="ai-spinner" aria-hidden="true"></span><span>Sincronizando...</span></span>`;
+  }
+  try {
+    const synced = await syncAvailableModelsForKey(key);
+    if (Array.isArray(synced.textModels) && synced.textModels.length) {
+      cachedApiKeyModels = synced.textModels;
+    }
+  } catch {
+    // Mantém telemetria local se rede falhar
+  } finally {
+    renderAiRateLimitTab();
+  }
+}
+
 function renderAiRateLimitTab() {
   const wrap = document.getElementById('rateLimitTableWrap');
+  const summaryEl = document.getElementById('rateLimitSummaryCards');
   const resetBadge = document.getElementById('rateLimitResetBadge');
+  const updatedBadge = document.getElementById('rateLimitUpdatedBadge');
   const freeBtn = document.getElementById('rateLimitTierFreeBtn');
   const paidBtn = document.getElementById('rateLimitTierPaidBtn');
   if (!wrap) return;
@@ -691,11 +837,80 @@ function renderAiRateLimitTab() {
   const dashboard = getRateLimitDashboard({
     selectedModel: document.getElementById('m_geminiModel')?.value || state?.settings?.geminiModel,
     tier,
-    extraModels
+    extraModels,
+    availableApiModels: cachedApiKeyModels
   });
 
   if (resetBadge) {
-    resetBadge.textContent = `⏰ Renova RPD em ${dashboard.reset.label} (Dia PT: ${dashboard.reset ? dashboard.ptDay : ''})`;
+    const localClock = dashboard.reset.localResetTime ? ` (às ${dashboard.reset.localResetTime})` : '';
+    resetBadge.textContent = `⏰ Renovação em: ${dashboard.reset.label}${localClock}`;
+  }
+  if (updatedBadge) {
+    const nowStr = new Date(dashboard.updatedAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    updatedBadge.textContent = `Atualizado às ${nowStr}`;
+  }
+
+  // Cards de resumo claros para o Motor Ativo (Cota Diária RPD + Janelas RPM e TPM)
+  if (summaryEl && dashboard.activeRow) {
+    const row = dashboard.activeRow;
+    const hasLimits = Boolean(row.limits);
+    const localClock = dashboard.reset.localResetTime ? `às ${dashboard.reset.localResetTime} · ` : '';
+
+    summaryEl.innerHTML = `
+      <div class="rl-summary-card rl-summary-rpd">
+        <div class="rl-summary-head">
+          <span class="rl-summary-title">📅 Cota Diária (RPD) · ${escapeHtml(row.name)}</span>
+          <span class="rl-status-pill ${escapeHtml(row.status)}">${escapeHtml(row.statusLabel)}</span>
+        </div>
+        ${hasLimits ? `
+          <div class="rl-kpi-grid">
+            <div class="rl-kpi"><span>Usado</span><strong>${formatBrInt(row.rpdUsed)}</strong></div>
+            <div class="rl-kpi"><span>Restante</span><strong>${formatBrInt(row.rpdRemaining)}</strong></div>
+            <div class="rl-kpi"><span>Limite</span><strong>${formatBrInt(row.rpdLimit)}</strong></div>
+            <div class="rl-kpi"><span>Consumo</span><strong>${formatBrPct(row.rpdPct)}</strong></div>
+          </div>
+          <div class="rl-bar-track rl-bar-lg"><div class="rl-bar-fill ${barColorClass(row.rpdPct)}" style="width:${row.rpdPct}%"></div></div>
+          <div class="rl-summary-foot">
+            <span>🔄 Renovação em: <strong>${escapeHtml(dashboard.reset.label)}</strong> (${localClock}00h PT)</span>
+            <span>${formatBrInt(row.tokensToday)} tokens hoje</span>
+          </div>
+        ` : `
+          <div class="muted-sm mt-8">Modelo exclusivo para <strong>API Paga (Tier 1)</strong>. Alterne o seletor acima para "API Paga (Tier 1)" para visualizar os limites pagos ou selecione um motor gratuito.</div>
+        `}
+      </div>
+
+      <div class="rl-summary-card">
+        <div class="rl-summary-head">
+          <span class="rl-summary-title">⚡ RPM (Janela 1 min)</span>
+          <span class="muted-xs">${row.windowResetSec > 0 ? `Libera em ~${row.windowResetSec}s` : 'Janela livre'}</span>
+        </div>
+        ${hasLimits ? `
+          <div class="rl-kpi-grid rl-kpi-3">
+            <div class="rl-kpi"><span>Usado</span><strong>${formatBrInt(row.rpmUsed)}</strong></div>
+            <div class="rl-kpi"><span>Limite</span><strong>${formatBrInt(row.rpmLimit)}</strong></div>
+            <div class="rl-kpi"><span>Restante</span><strong>${formatBrInt(row.rpmRemaining)}</strong></div>
+          </div>
+          <div class="rl-bar-track rl-bar-lg"><div class="rl-bar-fill ${barColorClass(row.rpmPct)}" style="width:${row.rpmPct}%"></div></div>
+          <div class="rl-summary-foot"><span>Consumo atual: <strong>${formatBrPct(row.rpmPct)}</strong></span></div>
+        ` : `<div class="muted-sm mt-8">Usado na janela: <strong>${formatBrInt(row.rpmUsed)}</strong> (requer Tier 1)</div>`}
+      </div>
+
+      <div class="rl-summary-card">
+        <div class="rl-summary-head">
+          <span class="rl-summary-title">🧮 TPM (Tokens / 1 min)</span>
+          <span class="muted-xs">${row.windowResetSec > 0 ? `Libera em ~${row.windowResetSec}s` : 'Janela livre'}</span>
+        </div>
+        ${hasLimits ? `
+          <div class="rl-kpi-grid rl-kpi-3">
+            <div class="rl-kpi"><span>Usado</span><strong>${formatBrInt(row.tpmUsed)}</strong></div>
+            <div class="rl-kpi"><span>Limite</span><strong>${formatBrInt(row.tpmLimit)}</strong></div>
+            <div class="rl-kpi"><span>Restante</span><strong>${formatBrInt(row.tpmRemaining)}</strong></div>
+          </div>
+          <div class="rl-bar-track rl-bar-lg"><div class="rl-bar-fill ${barColorClass(row.tpmPct)}" style="width:${row.tpmPct}%"></div></div>
+          <div class="rl-summary-foot"><span>Consumo atual: <strong>${formatBrPct(row.tpmPct)}</strong></span></div>
+        ` : `<div class="muted-sm mt-8">Usado na janela: <strong>${formatBrInt(row.tpmUsed)}</strong> tokens</div>`}
+      </div>
+    `;
   }
 
   wrap.innerHTML = `
@@ -712,9 +927,6 @@ function renderAiRateLimitTab() {
       </thead>
       <tbody>
         ${dashboard.rows.map((row) => {
-          const rpmMax = row.limits?.rpm;
-          const tpmMax = row.limits?.tpm;
-          const rpdMax = row.limits?.rpd;
           const hasLimits = Boolean(row.limits);
           return `
             <tr class="${row.isSelected ? 'rl-row-active' : ''}">
@@ -724,25 +936,28 @@ function renderAiRateLimitTab() {
                     <span>${escapeHtml(row.name)}</span>
                     ${row.isSelected ? `<span class="badge-pill">✓ Em uso</span>` : ''}
                   </div>
-                  <span class="muted-xs">${escapeHtml(row.id)} • ${escapeHtml(row.tierLabel)}${row.tokensToday ? ` • ${formatCompactCount(row.tokensToday)} tokens hoje` : ''}</span>
+                  <span class="muted-xs">${escapeHtml(row.id)} • ${escapeHtml(row.tierLabel)}${row.tokensToday ? ` • ${formatBrInt(row.tokensToday)} tokens hoje` : ''}</span>
                   ${row.lastError ? `<span class="muted-xs" style="color:var(--red);">${escapeHtml(row.lastError)}</span>` : ''}
                 </div>
               </td>
               <td>
                 <div class="rl-metric">
-                  <span class="rl-metric-text">${hasLimits ? `${row.rpmUsed} / ${formatCompactCount(rpmMax)}` : `${row.rpmUsed} / Pago`}</span>
+                  <span class="rl-metric-text">${hasLimits ? `${formatBrInt(row.rpmUsed)} / ${formatBrInt(row.rpmLimit)}` : `${formatBrInt(row.rpmUsed)} / Pago`}</span>
+                  <span class="rl-metric-sub">${hasLimits ? `Restante: ${formatBrInt(row.rpmRemaining)}` : 'Somente Tier 1'}</span>
                   <div class="rl-bar-track"><div class="rl-bar-fill ${barColorClass(row.rpmPct)}" style="width:${hasLimits ? row.rpmPct : 0}%"></div></div>
                 </div>
               </td>
               <td>
                 <div class="rl-metric">
-                  <span class="rl-metric-text">${hasLimits ? `${formatCompactCount(row.tpmUsed)} / ${formatCompactCount(tpmMax)}` : `${formatCompactCount(row.tpmUsed)} / Pago`}</span>
+                  <span class="rl-metric-text">${hasLimits ? `${formatBrInt(row.tpmUsed)} / ${formatBrInt(row.tpmLimit)}` : `${formatBrInt(row.tpmUsed)} / Pago`}</span>
+                  <span class="rl-metric-sub">${hasLimits ? `Restante: ${formatBrInt(row.tpmRemaining)}` : 'Somente Tier 1'}</span>
                   <div class="rl-bar-track"><div class="rl-bar-fill ${barColorClass(row.tpmPct)}" style="width:${hasLimits ? row.tpmPct : 0}%"></div></div>
                 </div>
               </td>
               <td>
                 <div class="rl-metric">
-                  <span class="rl-metric-text">${hasLimits ? `${row.rpdUsed} / ${formatCompactCount(rpdMax)}` : `${row.rpdUsed} / Pago`}</span>
+                  <span class="rl-metric-text">${hasLimits ? `${formatBrInt(row.rpdUsed)} / ${formatBrInt(row.rpdLimit)} (${formatBrPct(row.rpdPct)})` : `${formatBrInt(row.rpdUsed)} / Pago`}</span>
+                  <span class="rl-metric-sub">${hasLimits ? `Restante: ${formatBrInt(row.rpdRemaining)}` : 'Somente Tier 1'}</span>
                   <div class="rl-bar-track"><div class="rl-bar-fill ${barColorClass(row.rpdPct)}" style="width:${hasLimits ? row.rpdPct : 0}%"></div></div>
                 </div>
               </td>
@@ -2578,14 +2793,13 @@ function wireFactoryTab() {
   // Selected headline syncs with Cover Studio
   document.getElementById('o_selectedHeadline').addEventListener('input', (e) => {
     document.getElementById('cov_headline').value = e.target.value;
+    syncHeadlineSpansAfterTextChange(e.target.value);
+    renderCoverWordChips();
     updateCoverPreview();
   });
 
-  // Cover Studio live inputs
-  ['cov_headline', 'cov_seriesLabel', 'cov_template', 'cov_safeZoneToggle'].forEach((id) => {
-    document.getElementById(id).addEventListener('input', updateCoverPreview);
-    document.getElementById(id).addEventListener('change', updateCoverPreview);
-  });
+  // Cover Studio live inputs & advanced typography
+  wireCoverStudioAdvancedControls();
 
   document.getElementById('cov_uploadBg').addEventListener('change', (e) => {
     const file = e.target.files?.[0];
@@ -2606,22 +2820,49 @@ function wireFactoryTab() {
 
   document.getElementById('generateCoverAiBgBtn').addEventListener('click', async () => {
     const btn = document.getElementById('generateCoverAiBgBtn');
+    const diagBox = document.getElementById('coverAiBgDiagBox');
     const prompt = document.getElementById('o_coverImagePrompt').value.trim() || document.getElementById('cov_headline').value;
-    btn.disabled = true;
-    btn.textContent = '⏳ Gerando imagem IA...';
+    if (diagBox) diagBox.classList.add('hidden');
+
     try {
-      const bgUrl = await generateCoverBackground({
-        imagePrompt: prompt,
-        apiKey: state.settings.geminiKey
-      });
-      currentCoverBgDataUrl = bgUrl;
+      const result = await runWithStatusTicker(
+        btn,
+        'Gerando imagem IA...',
+        (onStatus) => generateCoverBackground({
+          imagePrompt: prompt,
+          apiKey: state.settings.geminiKey,
+          onStatus
+        }),
+        { showModelName: false }
+      );
+      currentCoverBgDataUrl = typeof result === 'string' ? result : (result?.dataUrl || '');
       await updateCoverPreview();
-      showToast('Fundo gerado por IA e aplicado à capa 9:16!', 'ok');
+      const usedLabel = typeof result === 'object' && result?.modelUsed ? ` via ${result.modelUsed}` : '';
+      showToast(`Fundo gerado por IA${usedLabel} e aplicado à capa 9:16!`, 'ok');
     } catch (err) {
       showToast(err.message, 'err');
-    } finally {
-      btn.disabled = false;
-      btn.textContent = '✨ Gerar Fundo com IA';
+      if (diagBox) {
+        const diags = Array.isArray(err?.diagnostics) ? err.diagnostics : [];
+        const discovered = Array.isArray(err?.discoveredImageModels) ? err.discoveredImageModels : [];
+        const diagListHtml = diags.length
+          ? `<details class="mt-8"><summary class="muted-xs" style="cursor:pointer;font-weight:700;">🔍 Ver diagnóstico técnico (${diags.length} tentativa(s))</summary>
+              <div class="cov-diag-list mt-6">
+                ${discovered.length ? `<div class="muted-xs"><strong>Modelos de imagem listados na chave:</strong> ${escapeHtml(discovered.join(', '))}</div>` : `<div class="muted-xs"><strong>Modelos de imagem listados na chave:</strong> nenhum listado no endpoint /v1beta/models</div>`}
+                ${diags.slice(0, 8).map((d) => `<div class="cov-diag-item"><code>${escapeHtml(d.model)}${escapeHtml(d.endpoint)}</code> · HTTP ${escapeHtml(String(d.status))} — ${escapeHtml(String(d.message).slice(0, 180))}</div>`).join('')}
+              </div>
+            </details>`
+          : '';
+        diagBox.innerHTML = `
+          <div class="muted-xs" style="color:var(--red);font-weight:700;">⚠️ Geração de Imagem via API indisponível nesta chave</div>
+          <p class="muted-xs mt-6">${escapeHtml(err.message)}</p>
+          <div class="inline-controls mt-8">
+            <a href="https://gemini.google.com" target="_blank" rel="noopener noreferrer" class="btn btn-secondary btn-xs">↗ Abrir Gemini App (Grátis)</a>
+            <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" class="btn btn-secondary btn-xs">↗ Verificar Faturamento AI Studio</a>
+          </div>
+          ${diagListHtml}
+        `;
+        diagBox.classList.remove('hidden');
+      }
     }
   });
 
@@ -2629,9 +2870,10 @@ function wireFactoryTab() {
     const btn = document.getElementById('downloadCoverBtn');
     btn.disabled = true;
     try {
-      const { dataUrl, blob } = await renderCleanCoverExport(getCoverOptions());
+      const opts = getCoverOptions();
+      const { dataUrl, blob } = await renderCleanCoverExport(opts);
       const part = document.getElementById('f_partNumber').value || 1;
-      const filename = `capa-reels-parte-${part}.png`;
+      const filename = opts.backgroundOnly ? `fundo-capa-parte-${part}.png` : `capa-reels-parte-${part}.png`;
       const result = await saveCoverImage({ blob, dataUrl, filename });
 
       if (result.method === 'share') {
@@ -2641,7 +2883,7 @@ function wireFactoryTab() {
         document.getElementById('coverExportImg').src = dataUrl;
         document.getElementById('coverExportModal').classList.remove('hidden');
       } else if (result.method === 'download') {
-        showToast('Capa 1080×1920 PNG salva sem guia de área segura!', 'ok');
+        showToast(opts.backgroundOnly ? 'Fundo limpo 1080×1920 PNG salvo!' : 'Capa 1080×1920 PNG salva sem guia de área segura!', 'ok');
       }
     } finally {
       btn.disabled = false;
@@ -2711,6 +2953,7 @@ async function handleGenerateEpisode() {
           learn: document.getElementById('f_qLearn').value.trim(),
           lifeChange: document.getElementById('f_qLifeChange').value.trim()
         },
+        customInstructions: document.getElementById('f_customInstructions')?.value.trim() || '',
         sourceNews,
         driveWebhookUrl: getEffectiveDriveWebhook(state, activeCreator),
         apiKey: state.settings.geminiKey,
@@ -2738,6 +2981,10 @@ async function handleGenerateEpisode() {
     document.getElementById('cov_headline').value = primaryHeadline;
     document.getElementById('cov_seriesLabel').value = serie?.name || '';
     document.getElementById('trendSeriesNotice')?.classList.add('hidden');
+    coverHeadlineSpans = [];
+    activeCoverSelection = null;
+    renderCoverWordChips();
+    renderCoverSelectionPanel();
 
     updateScriptTimerBadge();
     await updateCoverPreview();
@@ -2786,6 +3033,10 @@ function renderHeadlineChips(headlines) {
       btn.classList.add('selected');
       document.getElementById('o_selectedHeadline').value = btn.dataset.hl;
       document.getElementById('cov_headline').value = btn.dataset.hl;
+      coverHeadlineSpans = [];
+      activeCoverSelection = null;
+      renderCoverWordChips();
+      renderCoverSelectionPanel();
       updateCoverPreview();
     });
   });
@@ -2796,6 +3047,417 @@ function updateScriptTimerBadge() {
   const badge = document.getElementById('scriptTimerBadge');
   badge.textContent = `~${words} palavras • ~${secs}s`;
   badge.style.color = secs > 60 ? 'var(--red)' : 'var(--soft-accent)';
+}
+
+function applyCoverTemplateDefaults(templateId, { preserveSpans = true } = {}) {
+  const accent = getActiveCreator()?.brandColor || '#8B5CF6';
+  const def = getTemplateDefaultStyle(templateId, accent);
+  coverGlobalStyle = {
+    fontFamily: def.fontFamily,
+    fontSize: def.fontSize,
+    color: def.color,
+    bold: def.bold,
+    italic: def.italic,
+    underline: def.underline,
+    letterSpacing: def.letterSpacing,
+    lineHeight: def.lineHeight,
+    textTransform: def.textTransform,
+    strokeColor: def.strokeColor,
+    strokeWidth: def.strokeWidth
+  };
+  coverBadgeStyle = {
+    color: def.badgeColor,
+    opacity: def.badgeOpacity,
+    textColor: def.badgeTextColor
+  };
+  coverColorManuallyEdited = false;
+  if (!preserveSpans) {
+    coverHeadlineSpans = [];
+    activeCoverSelection = null;
+  }
+  syncCoverControlsFromState();
+}
+
+function syncCoverControlsFromState() {
+  const setVal = (id, val) => {
+    const el = document.getElementById(id);
+    if (el && val !== undefined && val !== null) el.value = String(val);
+  };
+  const setText = (id, txt) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = txt;
+  };
+  const setActive = (id, on) => {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle('active', Boolean(on));
+  };
+
+  setVal('cov_fontFamily', coverGlobalStyle.fontFamily);
+  setVal('cov_textTransform', coverGlobalStyle.textTransform);
+  setVal('cov_textColor', coverGlobalStyle.color);
+  setVal('cov_fontSize', coverGlobalStyle.fontSize);
+  setText('cov_fontSizeVal', `${coverGlobalStyle.fontSize}px`);
+  setVal('cov_letterSpacing', coverGlobalStyle.letterSpacing);
+  setText('cov_letterSpacingVal', `${coverGlobalStyle.letterSpacing}px`);
+  setVal('cov_lineHeight', coverGlobalStyle.lineHeight);
+  setText('cov_lineHeightVal', `${Number(coverGlobalStyle.lineHeight).toFixed(2)}x`);
+  setVal('cov_strokeColor', coverGlobalStyle.strokeColor);
+  setVal('cov_strokeWidth', coverGlobalStyle.strokeWidth);
+  setText('cov_strokeWidthVal', `${coverGlobalStyle.strokeWidth}px`);
+
+  setActive('cov_boldBtn', coverGlobalStyle.bold);
+  setActive('cov_italicBtn', coverGlobalStyle.italic);
+  setActive('cov_underlineBtn', coverGlobalStyle.underline);
+
+  setVal('cov_badgeColor', coverBadgeStyle.color);
+  setVal('cov_badgeTextColor', coverBadgeStyle.textColor);
+  setVal('cov_badgeOpacity', coverBadgeStyle.opacity);
+  setText('cov_badgeOpacityVal', `${coverBadgeStyle.opacity}%`);
+}
+
+function extractHeadlineWords(text = '') {
+  const words = [];
+  const regex = /\S+/g;
+  let m;
+  while ((m = regex.exec(String(text || ''))) !== null) {
+    words.push({ word: m[0], start: m.index, end: m.index + m[0].length });
+  }
+  return words;
+}
+
+function syncHeadlineSpansAfterTextChange(newText = '') {
+  const str = String(newText || '');
+  if (!coverHeadlineSpans.length) return;
+  const updated = [];
+  for (const sp of coverHeadlineSpans) {
+    const needle = String(sp.text || '').trim();
+    if (!needle) continue;
+    // Procura ocorrência mais próxima do índice original
+    let bestIdx = -1;
+    let bestDist = Infinity;
+    let searchFrom = 0;
+    while (searchFrom < str.length) {
+      const idx = str.indexOf(needle, searchFrom);
+      if (idx === -1) break;
+      const dist = Math.abs(idx - (sp.start || 0));
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestIdx = idx;
+      }
+      searchFrom = idx + 1;
+    }
+    if (bestIdx !== -1) {
+      updated.push({ ...sp, start: bestIdx, end: bestIdx + needle.length, text: needle });
+    }
+  }
+  coverHeadlineSpans = updated;
+  if (activeCoverSelection) {
+    const selTxt = str.slice(activeCoverSelection.start, activeCoverSelection.end);
+    if (!selTxt.trim()) activeCoverSelection = null;
+    else activeCoverSelection.text = selTxt;
+  }
+}
+
+function findSpanForSelection(sel) {
+  if (!sel) return null;
+  return coverHeadlineSpans.find((sp) => sp.start === sel.start && sp.end === sel.end)
+    || coverHeadlineSpans.find((sp) => sp.end > sel.start && sp.start < sel.end)
+    || null;
+}
+
+function renderCoverWordChips() {
+  const box = document.getElementById('cov_wordChips');
+  const ta = document.getElementById('cov_headline');
+  if (!box || !ta) return;
+
+  const words = extractHeadlineWords(ta.value);
+  if (!words.length) {
+    box.innerHTML = `<span class="muted-xs">Digite uma headline acima para selecionar palavras.</span>`;
+    return;
+  }
+
+  box.innerHTML = words.map((w) => {
+    const span = coverHeadlineSpans.find((sp) => sp.end > w.start && sp.start < w.end);
+    const isSelected = activeCoverSelection && activeCoverSelection.end > w.start && activeCoverSelection.start < w.end;
+    const dot = span?.color ? `<span class="cov-word-dot" style="background:${escapeHtml(span.color)}"></span>` : '';
+    return `<button type="button" class="cov-word-chip ${isSelected ? 'selected' : ''} ${span ? 'styled' : ''}" data-start="${w.start}" data-end="${w.end}">${dot}${escapeHtml(w.word)}</button>`;
+  }).join('');
+
+  box.querySelectorAll('.cov-word-chip').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      const wStart = Number(btn.dataset.start);
+      const wEnd = Number(btn.dataset.end);
+      let start = wStart;
+      let end = wEnd;
+      if (e.shiftKey && activeCoverSelection) {
+        start = Math.min(activeCoverSelection.start, wStart);
+        end = Math.max(activeCoverSelection.end, wEnd);
+      }
+      ta.focus();
+      try { ta.setSelectionRange(start, end); } catch (_) {}
+      setActiveCoverSelection(start, end);
+    });
+  });
+}
+
+function setActiveCoverSelection(start, end) {
+  const ta = document.getElementById('cov_headline');
+  if (!ta) return;
+  const s = Math.max(0, Number(start) || 0);
+  const e = Math.min(ta.value.length, Number(end) || 0);
+  const text = ta.value.slice(s, e).trim();
+  if (!text || e <= s) {
+    activeCoverSelection = null;
+  } else {
+    // Ajusta limites removendo espaços nas pontas
+    const rawSlice = ta.value.slice(s, e);
+    const leadSpaces = rawSlice.length - rawSlice.trimStart().length;
+    const trailSpaces = rawSlice.length - rawSlice.trimEnd().length;
+    activeCoverSelection = {
+      start: s + leadSpaces,
+      end: e - trailSpaces,
+      text
+    };
+  }
+  renderCoverWordChips();
+  renderCoverSelectionPanel();
+}
+
+function renderCoverSelectionPanel() {
+  const labelEl = document.getElementById('cov_selectionLabel');
+  const controlsEl = document.getElementById('cov_selectionControls');
+  const emptyEl = document.getElementById('cov_selectionEmptyHint');
+  const summaryBar = document.getElementById('cov_spansSummaryBar');
+  const countLabel = document.getElementById('cov_spansCountLabel');
+  if (!labelEl || !controlsEl || !emptyEl) return;
+
+  if (summaryBar && countLabel) {
+    summaryBar.classList.toggle('hidden', coverHeadlineSpans.length === 0);
+    countLabel.textContent = `${coverHeadlineSpans.length} destaque(s) personalizado(s) ativo(s)`;
+  }
+
+  if (!activeCoverSelection) {
+    labelEl.textContent = 'Nenhuma seleção';
+    controlsEl.classList.add('hidden');
+    emptyEl.classList.remove('hidden');
+    return;
+  }
+
+  labelEl.textContent = `"${activeCoverSelection.text.slice(0, 26)}"`;
+  controlsEl.classList.remove('hidden');
+  emptyEl.classList.add('hidden');
+
+  const existing = findSpanForSelection(activeCoverSelection);
+  const selColor = existing?.color || '#FFE600';
+  const selBold = typeof existing?.bold === 'boolean' ? existing.bold : coverGlobalStyle.bold;
+  const selItalic = typeof existing?.italic === 'boolean' ? existing.italic : coverGlobalStyle.italic;
+  const selUnderline = typeof existing?.underline === 'boolean' ? existing.underline : coverGlobalStyle.underline;
+  const selScale = existing?.sizeScale || 100;
+  const selStrokeColor = existing?.strokeColor || coverGlobalStyle.strokeColor || '#000000';
+  const selStrokeWidth = typeof existing?.strokeWidth === 'number' ? existing.strokeWidth : (coverGlobalStyle.strokeWidth || 0);
+
+  document.getElementById('cov_selColor').value = selColor;
+  document.getElementById('cov_selBoldBtn').classList.toggle('active', Boolean(selBold));
+  document.getElementById('cov_selItalicBtn').classList.toggle('active', Boolean(selItalic));
+  document.getElementById('cov_selUnderlineBtn').classList.toggle('active', Boolean(selUnderline));
+  document.getElementById('cov_selSizeScale').value = String(selScale);
+  document.getElementById('cov_selSizeScaleVal').textContent = `${selScale}%`;
+  document.getElementById('cov_selStrokeColor').value = selStrokeColor;
+  document.getElementById('cov_selStrokeWidth').value = String(selStrokeWidth);
+  document.getElementById('cov_selStrokeWidthVal').textContent = `${selStrokeWidth}px`;
+}
+
+function upsertActiveCoverSpan(patch = {}) {
+  if (!activeCoverSelection) return;
+  const { start, end, text } = activeCoverSelection;
+  let existing = coverHeadlineSpans.find((sp) => sp.start === start && sp.end === end);
+  if (!existing) {
+    // Remove spans totalmente contidos na nova seleção para evitar conflito
+    coverHeadlineSpans = coverHeadlineSpans.filter((sp) => !(sp.start >= start && sp.end <= end));
+    existing = {
+      start,
+      end,
+      text,
+      color: document.getElementById('cov_selColor')?.value || '#FFE600',
+      bold: document.getElementById('cov_selBoldBtn')?.classList.contains('active') ?? true,
+      italic: document.getElementById('cov_selItalicBtn')?.classList.contains('active') ?? false,
+      underline: document.getElementById('cov_selUnderlineBtn')?.classList.contains('active') ?? false,
+      sizeScale: Number(document.getElementById('cov_selSizeScale')?.value || 100),
+      strokeColor: document.getElementById('cov_selStrokeColor')?.value || '#000000',
+      strokeWidth: Number(document.getElementById('cov_selStrokeWidth')?.value || 0)
+    };
+    coverHeadlineSpans.push(existing);
+  }
+  Object.assign(existing, patch, { start, end, text });
+  renderCoverWordChips();
+  renderCoverSelectionPanel();
+  updateCoverPreview();
+}
+
+function wireCoverStudioAdvancedControls() {
+  const hlInput = document.getElementById('cov_headline');
+  if (hlInput) {
+    hlInput.addEventListener('input', () => {
+      syncHeadlineSpansAfterTextChange(hlInput.value);
+      renderCoverWordChips();
+      renderCoverSelectionPanel();
+      updateCoverPreview();
+    });
+    const captureSelection = () => {
+      if (hlInput.selectionEnd > hlInput.selectionStart) {
+        setActiveCoverSelection(hlInput.selectionStart, hlInput.selectionEnd);
+      }
+    };
+    hlInput.addEventListener('select', captureSelection);
+    hlInput.addEventListener('mouseup', captureSelection);
+    hlInput.addEventListener('keyup', captureSelection);
+  }
+
+  // Template switch applies signature layout + typography + badge defaults
+  document.getElementById('cov_template')?.addEventListener('change', (e) => {
+    applyCoverTemplateDefaults(e.target.value, { preserveSpans: true });
+    updateCoverPreview();
+  });
+
+  document.getElementById('cov_resetStyleBtn')?.addEventListener('click', () => {
+    const tpl = document.getElementById('cov_template')?.value || 'apple_light';
+    applyCoverTemplateDefaults(tpl, { preserveSpans: false });
+    renderCoverWordChips();
+    renderCoverSelectionPanel();
+    updateCoverPreview();
+    showToast('Tipografia e selo restaurados para o padrão do estilo!', 'ok');
+  });
+
+  // Basic live controls
+  ['cov_seriesLabel', 'cov_safeZoneToggle', 'cov_backgroundOnlyToggle'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('input', updateCoverPreview);
+    el.addEventListener('change', updateCoverPreview);
+  });
+
+  // Global Headline Typography controls
+  document.getElementById('cov_fontFamily')?.addEventListener('change', (e) => {
+    coverGlobalStyle.fontFamily = e.target.value;
+    updateCoverPreview();
+  });
+  document.getElementById('cov_textTransform')?.addEventListener('change', (e) => {
+    coverGlobalStyle.textTransform = e.target.value;
+    updateCoverPreview();
+  });
+  document.getElementById('cov_textColor')?.addEventListener('input', (e) => {
+    coverGlobalStyle.color = e.target.value;
+    coverColorManuallyEdited = true;
+    updateCoverPreview();
+  });
+  document.getElementById('cov_fontSize')?.addEventListener('input', (e) => {
+    coverGlobalStyle.fontSize = Number(e.target.value);
+    document.getElementById('cov_fontSizeVal').textContent = `${coverGlobalStyle.fontSize}px`;
+    updateCoverPreview();
+  });
+  document.getElementById('cov_letterSpacing')?.addEventListener('input', (e) => {
+    coverGlobalStyle.letterSpacing = Number(e.target.value);
+    document.getElementById('cov_letterSpacingVal').textContent = `${coverGlobalStyle.letterSpacing}px`;
+    updateCoverPreview();
+  });
+  document.getElementById('cov_lineHeight')?.addEventListener('input', (e) => {
+    coverGlobalStyle.lineHeight = Number(e.target.value);
+    document.getElementById('cov_lineHeightVal').textContent = `${coverGlobalStyle.lineHeight.toFixed(2)}x`;
+    updateCoverPreview();
+  });
+  document.getElementById('cov_strokeColor')?.addEventListener('input', (e) => {
+    coverGlobalStyle.strokeColor = e.target.value;
+    updateCoverPreview();
+  });
+  document.getElementById('cov_strokeWidth')?.addEventListener('input', (e) => {
+    coverGlobalStyle.strokeWidth = Number(e.target.value);
+    document.getElementById('cov_strokeWidthVal').textContent = `${coverGlobalStyle.strokeWidth}px`;
+    updateCoverPreview();
+  });
+
+  document.getElementById('cov_boldBtn')?.addEventListener('click', (e) => {
+    coverGlobalStyle.bold = !coverGlobalStyle.bold;
+    e.currentTarget.classList.toggle('active', coverGlobalStyle.bold);
+    updateCoverPreview();
+  });
+  document.getElementById('cov_italicBtn')?.addEventListener('click', (e) => {
+    coverGlobalStyle.italic = !coverGlobalStyle.italic;
+    e.currentTarget.classList.toggle('active', coverGlobalStyle.italic);
+    updateCoverPreview();
+  });
+  document.getElementById('cov_underlineBtn')?.addEventListener('click', (e) => {
+    coverGlobalStyle.underline = !coverGlobalStyle.underline;
+    e.currentTarget.classList.toggle('active', coverGlobalStyle.underline);
+    updateCoverPreview();
+  });
+
+  // Badge Color & Opacity controls
+  document.getElementById('cov_badgeColor')?.addEventListener('input', (e) => {
+    coverBadgeStyle.color = e.target.value;
+    updateCoverPreview();
+  });
+  document.getElementById('cov_badgeTextColor')?.addEventListener('input', (e) => {
+    coverBadgeStyle.textColor = e.target.value;
+    updateCoverPreview();
+  });
+  document.getElementById('cov_badgeOpacity')?.addEventListener('input', (e) => {
+    coverBadgeStyle.opacity = Number(e.target.value);
+    document.getElementById('cov_badgeOpacityVal').textContent = `${coverBadgeStyle.opacity}%`;
+    updateCoverPreview();
+  });
+
+  // Selection-Specific Formatting controls
+  document.getElementById('cov_selColor')?.addEventListener('input', (e) => {
+    upsertActiveCoverSpan({ color: e.target.value });
+  });
+  document.getElementById('cov_selBoldBtn')?.addEventListener('click', (e) => {
+    const next = !e.currentTarget.classList.contains('active');
+    e.currentTarget.classList.toggle('active', next);
+    upsertActiveCoverSpan({ bold: next });
+  });
+  document.getElementById('cov_selItalicBtn')?.addEventListener('click', (e) => {
+    const next = !e.currentTarget.classList.contains('active');
+    e.currentTarget.classList.toggle('active', next);
+    upsertActiveCoverSpan({ italic: next });
+  });
+  document.getElementById('cov_selUnderlineBtn')?.addEventListener('click', (e) => {
+    const next = !e.currentTarget.classList.contains('active');
+    e.currentTarget.classList.toggle('active', next);
+    upsertActiveCoverSpan({ underline: next });
+  });
+  document.getElementById('cov_selSizeScale')?.addEventListener('input', (e) => {
+    const val = Number(e.target.value);
+    document.getElementById('cov_selSizeScaleVal').textContent = `${val}%`;
+    upsertActiveCoverSpan({ sizeScale: val });
+  });
+  document.getElementById('cov_selStrokeColor')?.addEventListener('input', (e) => {
+    upsertActiveCoverSpan({ strokeColor: e.target.value });
+  });
+  document.getElementById('cov_selStrokeWidth')?.addEventListener('input', (e) => {
+    const val = Number(e.target.value);
+    document.getElementById('cov_selStrokeWidthVal').textContent = `${val}px`;
+    upsertActiveCoverSpan({ strokeWidth: val });
+  });
+
+  document.getElementById('cov_clearSelSpanBtn')?.addEventListener('click', () => {
+    if (!activeCoverSelection) return;
+    coverHeadlineSpans = coverHeadlineSpans.filter(
+      (sp) => !(sp.end > activeCoverSelection.start && sp.start < activeCoverSelection.end)
+    );
+    renderCoverWordChips();
+    renderCoverSelectionPanel();
+    updateCoverPreview();
+    showToast('Estilo personalizado desta seleção removido.', 'ok');
+  });
+
+  document.getElementById('cov_clearAllSpansBtn')?.addEventListener('click', () => {
+    coverHeadlineSpans = [];
+    activeCoverSelection = null;
+    renderCoverWordChips();
+    renderCoverSelectionPanel();
+    updateCoverPreview();
+    showToast('Todos os destaques por palavra foram limpos.', 'ok');
+  });
 }
 
 function getCoverOptions() {
@@ -2812,7 +3474,14 @@ function getCoverOptions() {
     accentColor: creator?.brandColor || '#8B5CF6',
     templateId: document.getElementById('cov_template').value || defaultTpl,
     bgDataUrl: currentCoverBgDataUrl,
-    showSafeZone: document.getElementById('cov_safeZoneToggle').checked
+    showSafeZone: document.getElementById('cov_safeZoneToggle').checked,
+    backgroundOnly: Boolean(document.getElementById('cov_backgroundOnlyToggle')?.checked),
+    headlineStyle: {
+      ...coverGlobalStyle,
+      colorOverride: coverColorManuallyEdited
+    },
+    headlineSpans: coverHeadlineSpans.map((sp) => ({ ...sp })),
+    badgeStyle: { ...coverBadgeStyle }
   };
 }
 
@@ -2860,12 +3529,21 @@ async function saveCurrentEpisode({ silent = false } = {}) {
       learn: document.getElementById('f_qLearn').value.trim(),
       lifeChange: document.getElementById('f_qLifeChange').value.trim()
     },
+    customInstructions: document.getElementById('f_customInstructions')?.value || '',
     script: document.getElementById('o_script').value,
     caption: document.getElementById('o_caption').value,
     editingPrompt: document.getElementById('o_editingPrompt').value,
     coverImagePrompt: document.getElementById('o_coverImagePrompt').value,
     coverBgDataUrl: currentCoverBgDataUrl,
     coverDataUrl: cleanCoverUrl,
+    coverStyle: {
+      templateId: document.getElementById('cov_template')?.value || 'apple_light',
+      globalStyle: { ...coverGlobalStyle },
+      badgeStyle: { ...coverBadgeStyle },
+      headlineSpans: coverHeadlineSpans.map((sp) => ({ ...sp })),
+      backgroundOnly: Boolean(document.getElementById('cov_backgroundOnlyToggle')?.checked),
+      colorManuallyEdited: coverColorManuallyEdited
+    },
     createdAt: existing ? existing.createdAt : new Date().toISOString(),
     updatedAt: new Date().toISOString()
   };
@@ -2912,6 +3590,8 @@ function loadEpisodeIntoFactory(ep) {
   document.getElementById('f_qProblem').value = ep.validation?.problem || '';
   document.getElementById('f_qLearn').value = ep.validation?.learn || '';
   document.getElementById('f_qLifeChange').value = ep.validation?.lifeChange || '';
+  const customEl = document.getElementById('f_customInstructions');
+  if (customEl) customEl.value = ep.customInstructions || '';
   setFactorySourceNews(ep.sourceNews || null);
 
   document.getElementById('o_title').value = ep.title || '';
@@ -2921,12 +3601,36 @@ function loadEpisodeIntoFactory(ep) {
   document.getElementById('o_caption').value = ep.caption || '';
   document.getElementById('o_editingPrompt').value = ep.editingPrompt || '';
   document.getElementById('o_coverImagePrompt').value = ep.coverImagePrompt || '';
+  document.getElementById('coverAiBgDiagBox')?.classList.add('hidden');
 
   renderHeadlineChips(ep.headlines || []);
   const hl = (ep.headlines && ep.headlines[0]) || ep.title || '';
   document.getElementById('o_selectedHeadline').value = hl;
   document.getElementById('cov_headline').value = hl;
   document.getElementById('cov_seriesLabel').value = serie?.name || '';
+
+  const defaultTpl = (state?.settings?.theme || 'light') === 'dark' ? 'apple_dark' : 'apple_light';
+  const savedCoverStyle = ep.coverStyle;
+  if (savedCoverStyle && savedCoverStyle.templateId) {
+    const validTpl = COVER_TEMPLATES.some((t) => t.id === savedCoverStyle.templateId) ? savedCoverStyle.templateId : defaultTpl;
+    document.getElementById('cov_template').value = validTpl;
+    applyCoverTemplateDefaults(validTpl, { preserveSpans: false });
+    if (savedCoverStyle.globalStyle) coverGlobalStyle = { ...coverGlobalStyle, ...savedCoverStyle.globalStyle };
+    if (savedCoverStyle.badgeStyle) coverBadgeStyle = { ...coverBadgeStyle, ...savedCoverStyle.badgeStyle };
+    coverHeadlineSpans = Array.isArray(savedCoverStyle.headlineSpans) ? savedCoverStyle.headlineSpans.map((sp) => ({ ...sp })) : [];
+    coverColorManuallyEdited = Boolean(savedCoverStyle.colorManuallyEdited);
+    const bgOnlyEl = document.getElementById('cov_backgroundOnlyToggle');
+    if (bgOnlyEl) bgOnlyEl.checked = Boolean(savedCoverStyle.backgroundOnly);
+    syncCoverControlsFromState();
+  } else {
+    const curTpl = document.getElementById('cov_template')?.value || defaultTpl;
+    applyCoverTemplateDefaults(curTpl, { preserveSpans: false });
+    const bgOnlyEl = document.getElementById('cov_backgroundOnlyToggle');
+    if (bgOnlyEl) bgOnlyEl.checked = false;
+  }
+  activeCoverSelection = null;
+  renderCoverWordChips();
+  renderCoverSelectionPanel();
 
   renderSeriesPartsStrip();
   updateScriptTimerBadge();
@@ -2969,6 +3673,8 @@ function clearFactoryFields({ keepSeriesFree = false } = {}) {
   document.getElementById('f_qProblem').value = '';
   document.getElementById('f_qLearn').value = '';
   document.getElementById('f_qLifeChange').value = '';
+  const customEl = document.getElementById('f_customInstructions');
+  if (customEl) customEl.value = '';
   document.getElementById('o_title').value = '';
   document.getElementById('o_status').value = 'roteiro';
   document.getElementById('o_onScreenText').value = nextPartLabel;
@@ -2976,10 +3682,17 @@ function clearFactoryFields({ keepSeriesFree = false } = {}) {
   document.getElementById('o_caption').value = '';
   document.getElementById('o_editingPrompt').value = '';
   document.getElementById('o_coverImagePrompt').value = '';
+  document.getElementById('coverAiBgDiagBox')?.classList.add('hidden');
   document.getElementById('headlinesChips').innerHTML = '';
   document.getElementById('o_selectedHeadline').value = '';
   document.getElementById('cov_headline').value = '';
   document.getElementById('cov_seriesLabel').value = serie?.name || '';
+  const bgOnlyEl = document.getElementById('cov_backgroundOnlyToggle');
+  if (bgOnlyEl) bgOnlyEl.checked = false;
+  coverHeadlineSpans = [];
+  activeCoverSelection = null;
+  renderCoverWordChips();
+  renderCoverSelectionPanel();
   renderSeriesPartsStrip();
   updateScriptTimerBadge();
   updateCoverPreview();

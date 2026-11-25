@@ -244,10 +244,24 @@ export function getTimeUntilPacificReset(nowMs = Date.now()) {
   const totalRemainingMin = Math.max(1, (24 * 60) - (hourPT * 60 + minutePT));
   const hours = Math.floor(totalRemainingMin / 60);
   const minutes = totalRemainingMin % 60;
+  const resetTimestamp = nowMs + (totalRemainingMin * 60 * 1000);
+  let localResetTime = '';
+  try {
+    localResetTime = new Date(resetTimestamp).toLocaleTimeString('pt-BR', {
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  } catch {
+    localResetTime = '';
+  }
+
   return {
     hours,
     minutes,
-    label: `${hours}h ${String(minutes).padStart(2, '0')}m`
+    totalRemainingMin,
+    resetTimestamp,
+    localResetTime,
+    label: `${String(hours).padStart(2, '0')}h${String(minutes).padStart(2, '0')}min`
   };
 }
 
@@ -330,6 +344,7 @@ export function getRateLimitDashboard({
   selectedModel = 'gemini-4-hydrogen',
   tier = 'free',
   extraModels = [],
+  availableApiModels = null,
   nowMs = Date.now()
 } = {}) {
   const store = readRateLimitStore();
@@ -338,6 +353,9 @@ export function getRateLimitDashboard({
   const reset = getTimeUntilPacificReset(nowMs);
   const normalizedSelected = resolveSelectedModel(selectedModel);
   const useTier1 = tier === 'tier1';
+  const availableSet = Array.isArray(availableApiModels) && availableApiModels.length
+    ? new Set(availableApiModels)
+    : null;
 
   const catalogIds = new Set(MODEL_RATE_LIMIT_CATALOG.map((m) => m.id));
   const extraIds = [...(extraModels || []), normalizedSelected]
@@ -359,22 +377,41 @@ export function getRateLimitDashboard({
   const rows = allModels.map((spec) => {
     const entry = store.models?.[spec.id] || { events: [] };
     const events = Array.isArray(entry.events) ? entry.events : [];
-    const lastMinEvents = events.filter((ev) => ev.ts >= oneMinAgo);
-    const todayEvents = events.filter((ev) => ev.ptDay === ptDay);
+    const lastMinEvents = events
+      .filter((ev) => ev && ev.ts >= oneMinAgo)
+      .sort((a, b) => a.ts - b.ts);
+    const todayEvents = events.filter((ev) => ev && ev.ptDay === ptDay);
 
     const rpmUsed = lastMinEvents.length;
     const tpmUsed = lastMinEvents.reduce((sum, ev) => sum + (Number(ev.totalTokens) || 0), 0);
     const rpdUsed = todayEvents.length;
     const tokensToday = todayEvents.reduce((sum, ev) => sum + (Number(ev.totalTokens) || 0), 0);
+    const windowResetSec = lastMinEvents.length
+      ? Math.max(1, Math.ceil((lastMinEvents[0].ts + 60000 - nowMs) / 1000))
+      : 0;
 
     const limits = useTier1 ? spec.tier1 : spec.free;
     const dailyBlocked = entry.dailyBlockedPtDay === ptDay;
     const cooldownActive = Number(entry.cooldownUntil || 0) > nowMs;
     const paidOnlyOnFree = !useTier1 && !spec.free;
 
-    const rpmPct = limits?.rpm ? Math.min(100, Math.round((rpmUsed / limits.rpm) * 100)) : 0;
-    const tpmPct = limits?.tpm ? Math.min(100, Math.round((tpmUsed / limits.tpm) * 100)) : 0;
-    const rpdPct = limits?.rpd ? Math.min(100, Math.round((rpdUsed / limits.rpd) * 100)) : 0;
+    const rpmLimit = limits?.rpm ?? null;
+    const tpmLimit = limits?.tpm ?? null;
+    const rpdLimit = limits?.rpd ?? null;
+
+    const rpmRemaining = rpmLimit !== null ? Math.max(0, rpmLimit - rpmUsed) : null;
+    const tpmRemaining = tpmLimit !== null ? Math.max(0, tpmLimit - tpmUsed) : null;
+    const rpdRemaining = rpdLimit !== null
+      ? (dailyBlocked ? 0 : Math.max(0, rpdLimit - rpdUsed))
+      : null;
+
+    const rpmPct = rpmLimit ? Math.min(100, Number(((rpmUsed / rpmLimit) * 100).toFixed(1))) : 0;
+    const tpmPct = tpmLimit ? Math.min(100, Number(((tpmUsed / tpmLimit) * 100).toFixed(1))) : 0;
+    const rpdPct = rpdLimit
+      ? (dailyBlocked ? 100 : Math.min(100, Number(((rpdUsed / rpdLimit) * 100).toFixed(1))))
+      : 0;
+
+    const inApiKeyCatalog = availableSet ? availableSet.has(spec.id) : null;
 
     let status = 'ok';
     let statusLabel = 'Disponível';
@@ -388,15 +425,21 @@ export function getRateLimitDashboard({
     } else if (paidOnlyOnFree) {
       status = 'paid';
       statusLabel = 'Somente API Paga';
+    } else if (inApiKeyCatalog === false) {
+      status = 'paid';
+      statusLabel = 'Não listado na chave';
     } else if (entry.lastStatus === 'high_demand' && (nowMs - (entry.lastUsedAt || 0)) < 5 * 60 * 1000) {
       status = 'warn';
       statusLabel = 'Alta demanda recente';
     } else if (rpdPct >= 80 || rpmPct >= 80 || tpmPct >= 80) {
       status = 'warn';
       statusLabel = 'Perto do limite';
-    } else if (rpdUsed > 0) {
+    } else if (rpmUsed > 0 || rpdUsed > 0) {
       status = 'ok';
-      statusLabel = 'Ativo agora';
+      statusLabel = rpmUsed > 0 ? 'Em consumo na janela' : 'Ativo hoje';
+    } else if (inApiKeyCatalog === true) {
+      status = 'ok';
+      statusLabel = 'Liberado na chave';
     }
 
     return {
@@ -405,13 +448,22 @@ export function getRateLimitDashboard({
       tierLabel: spec.tierLabel,
       isSelected: spec.id === normalizedSelected,
       limits,
+      rpmLimit,
+      tpmLimit,
+      rpdLimit,
       rpmUsed,
       tpmUsed,
       rpdUsed,
+      rpmRemaining,
+      tpmRemaining,
+      rpdRemaining,
       tokensToday,
       rpmPct,
       tpmPct,
       rpdPct,
+      windowResetSec,
+      dailyBlocked,
+      inApiKeyCatalog,
       status,
       statusLabel,
       lastError: entry.lastError || '',
@@ -419,12 +471,49 @@ export function getRateLimitDashboard({
     };
   });
 
+  const activeRow = rows.find((r) => r.isSelected) || rows[0] || null;
+
   return {
     ptDay,
     tier: useTier1 ? 'tier1' : 'free',
     reset,
+    updatedAt: nowMs,
+    activeRow,
     rows
   };
+}
+
+export async function syncAvailableModelsForKey(apiKey) {
+  if (!apiKey) return { textModels: [], imageModels: [], imagenModels: [], categorized: null };
+  const textModels = await discoverActiveGeminiModels(apiKey, true);
+  const categorized = discoveredModelsCache.categorized || { gemini4: [], gemini3: [], image: [], imagen: [], other: [] };
+  return {
+    textModels,
+    imageModels: categorized.image || [],
+    imagenModels: categorized.imagen || [],
+    categorized
+  };
+}
+
+export async function probeAllModelsAvailability({ apiKey, models = [], onProgress = null }) {
+  if (!apiKey) {
+    throw new Error('Cole e salve sua Gemini API Key antes de testar os motores.');
+  }
+  const uniqueModels = Array.from(new Set((models || []).map((m) => resolveSelectedModel(m)).filter(Boolean)));
+  const results = [];
+  for (let i = 0; i < uniqueModels.length; i++) {
+    const modelId = uniqueModels[i];
+    if (typeof onProgress === 'function') {
+      onProgress({ index: i + 1, total: uniqueModels.length, modelId, modelName: formatModelDisplayName(modelId) });
+    }
+    try {
+      const res = await probeModelAvailability({ apiKey, modelName: modelId });
+      results.push(res);
+    } catch (err) {
+      results.push({ ok: false, model: modelId, status: 'error', message: err.message });
+    }
+  }
+  return results;
 }
 
 export async function probeModelAvailability({ apiKey, modelName = 'gemini-4-hydrogen' }) {
@@ -527,13 +616,20 @@ async function discoverActiveGeminiModels(apiKey, forceRefresh = false) {
       .map((m) => String(m.name || '').replace(/^models\//, ''))
       .filter((name) => /nano-banana|image/i.test(name));
 
+    const imagenModels = rawModels
+      .filter((m) => Array.isArray(m.supportedGenerationMethods) && m.supportedGenerationMethods.includes('predict'))
+      .map((m) => String(m.name || '').replace(/^models\//, ''))
+      .filter((name) => /^imagen-/i.test(name));
+
     discoveredModelsCache = {
       key: apiKey,
       models: textModels,
       categorized: {
         gemini4: textModels.filter((n) => /^gemini-4/i.test(n)),
         gemini3: textModels.filter((n) => /^gemini-3/i.test(n)),
-        image: imageModels,
+        image: [...imageModels, ...imagenModels],
+        imageGenerateContent: imageModels,
+        imagen: imagenModels,
         other: textModels.filter((n) => !/^gemini-(?:4|3)/i.test(n))
       }
     };
@@ -804,6 +900,7 @@ export async function generateCompleteEpisode(params) {
     funnelStage = 'topo',
     viralGoal = 'share',
     validation = {},
+    customInstructions = '',
     sourceNews = null,
     driveWebhookUrl = '',
     apiKey,
@@ -817,9 +914,10 @@ export async function generateCompleteEpisode(params) {
   const cleanSeries = String(seriesName || '').trim();
   const hasSeries = Boolean(cleanSeries);
   const validPart = Number(partNumber) >= 1 ? Number(partNumber) : null;
+  const cleanCustomInstructions = String(customInstructions || '').trim();
 
   if (!apiKey) {
-    return buildOfflineEpisode({ creator, modelObj, seriesName: cleanSeries, partNumber: validPart, topic, funnelObj, hierarchyObj, validation, sourceNews });
+    return buildOfflineEpisode({ creator, modelObj, seriesName: cleanSeries, partNumber: validPart, topic, funnelObj, hierarchyObj, validation, customInstructions: cleanCustomInstructions, sourceNews });
   }
 
   let articleContext = null;
@@ -858,6 +956,11 @@ ${seriesRule}
 - TÍTULO / HEADLINE DA CAPA: Deve ter 3 ingredientes (Específico + Curioso + Urgente) usando palavras que despertam curiosidade (Segredo, Truque, Isso, Entenda, Veja, Razão, Como, Pare).
 - CTA ESTRATÉGICA + PORTA NA CARA: Terminar com chamada alinhada ao objetivo viral (${hierarchyObj.label}) e corte seco imediato sem despedida.`;
 
+  const customInstructionsBlock = cleanCustomInstructions ? `
+
+INSTRUÇÕES PERSONALIZADAS DO CRIADOR PARA ESTA GERAÇÃO (PRIORIDADE ALTA — APLIQUE FIELMENTE SEM ALTERAR O DNA PRINCIPAL):
+${cleanCustomInstructions}` : '';
+
   const prompt = `Crie um pacote COMPLETO de Reels para o criador abaixo:
 
 ${buildCreatorContext(creator)}
@@ -871,7 +974,7 @@ PARÂMETROS DO EPISÓDIO:
 - Tema / Situação deste episódio: ${topic || 'Escolha uma dor específica de alto impacto do público do criador'}
 - Etapa do Funil: ${funnelObj.label} (${funnelObj.focus})
 - Objetivo Viral Principal: ${hierarchyObj.label} (${hierarchyObj.hint})
-- Pré-respostas do criador (se houver): Problema="${validation.problem || ''}", Aprendizado="${validation.learn || ''}", Mudança="${validation.lifeChange || ''}"${newsBlock}
+- Pré-respostas do criador (se houver): Problema="${validation.problem || ''}", Aprendizado="${validation.learn || ''}", Mudança="${validation.lifeChange || ''}"${newsBlock}${customInstructionsBlock}
 
 Retorne EXATAMENTE um JSON com esta estrutura:
 {
@@ -903,7 +1006,7 @@ Retorne EXATAMENTE um JSON com esta estrutura:
     };
   } catch (err) {
     if (!err?.fatal && isTransientServiceError(err)) {
-      const offline = buildOfflineEpisode({ creator, modelObj, seriesName: cleanSeries, partNumber: validPart, topic, funnelObj, hierarchyObj, validation, sourceNews });
+      const offline = buildOfflineEpisode({ creator, modelObj, seriesName: cleanSeries, partNumber: validPart, topic, funnelObj, hierarchyObj, validation, customInstructions: cleanCustomInstructions, sourceNews });
       return {
         ...offline,
         generatedBy: 'Motor Inteligente de Contingência (Pico de demanda no Google Gemini)',
@@ -914,7 +1017,7 @@ Retorne EXATAMENTE um JSON com esta estrutura:
   }
 }
 
-function buildOfflineEpisode({ creator, modelObj, seriesName = '', partNumber = null, topic, funnelObj, hierarchyObj, validation, sourceNews = null }) {
+function buildOfflineEpisode({ creator, modelObj, seriesName = '', partNumber = null, topic, funnelObj, hierarchyObj, validation, customInstructions = '', sourceNews = null }) {
   const pronoun = creator?.pronoun || 'você';
   const prefix = creator?.targetGroupPrefix || 'A pessoa que';
   const keyword = creator?.manychatKeyword || 'EUQUERO';
@@ -952,6 +1055,7 @@ function buildOfflineEpisode({ creator, modelObj, seriesName = '', partNumber = 
     : `Salva esse vídeo para aplicar ainda hoje e me segue para os próximos conteúdos.`;
 
   const newsRefLine = sourceNews?.title ? ` (Baseado na notícia: ${sourceNews.title})` : '';
+  const customNote = customInstructions ? `\n\n[DIREÇÃO PERSONALIZADA APLICADA]: ${customInstructions}` : '';
   const script = `[00-03s | GANCHO + BENEFÍCIO]
 ${hookLine} E nos próximos segundos eu vou te mostrar exatamente o que ${pronoun} pode ajustar hoje para destravar isso.
 
@@ -962,7 +1066,7 @@ Eu sei que na correria ${pronoun} tenta resolver tudo do jeito mais difícil${ne
 Eu, no seu lugar, faria assim — olha na prática: escolha um único ajuste simples ligado a ${cleanTopic} e aplique por 7 dias antes de querer mudar tudo de uma vez. Mostre na câmera ou no exemplo real como fica fácil quando tira a complicação.
 
 [35-45s | QUEBRA DE OBJEÇÃO + CTA + PORTA NA CARA]
-Porque ${pronoun} pode ter certeza: não é falta de tempo nem de capacidade, é só falta do método certo. ${ctaLine} [CORTE SECO IMEDIATO]`;
+Porque ${pronoun} pode ter certeza: não é falta de tempo nem de capacidade, é só falta do método certo. ${ctaLine} [CORTE SECO IMEDIATO]${customNote}`;
 
   return {
     title: cleanTopic.slice(0, 70),
@@ -2361,52 +2465,116 @@ function analyzeScriptOffline(script, creator) {
 }
 
 // ============================================================================
-// 5. GERADOR DE IMAGEM DE FUNDO PARA CAPA VIA NANO BANANA / GEMINI IMAGE
+// 5. GERADOR DE IMAGEM DE FUNDO PARA CAPA VIA NANO BANANA / GEMINI IMAGE / IMAGEN
 // ============================================================================
 
-export async function generateCoverBackground({ imagePrompt, apiKey }) {
+export async function generateCoverBackground({ imagePrompt, apiKey, onStatus = null }) {
   if (!apiKey) {
     throw new Error('Configure sua chave da API Gemini para gerar fundos inéditos com IA (você também pode usar os templates do Estúdio ou subir uma foto).');
   }
 
-  const imgModels = [
-    'gemini-nano-banana-2.1',
+  // Descobre modelos de imagem realmente liberados nesta chave (generateContent e Imagen predict)
+  if (typeof onStatus === 'function') onStatus('Consultando modelos de imagem na chave...');
+  await discoverActiveGeminiModels(apiKey, false);
+  const discoveredGenContent = discoveredModelsCache.categorized?.imageGenerateContent || [];
+  const discoveredImagen = discoveredModelsCache.categorized?.imagen || [];
+
+  const defaultGenContentModels = [
+    'gemini-2.5-flash-image',
+    'gemini-2.5-flash-image-preview',
+    'gemini-3.1-flash-image-preview',
     'gemini-3.1-flash-image',
+    'gemini-3-pro-image-preview',
     'gemini-3-pro-image',
-    'gemini-3.1-flash-lite-image',
-    'gemini-2.5-flash-image'
+    'gemini-nano-banana-2.1',
+    'gemini-2.0-flash-preview-image-generation'
   ];
 
-  for (const m of imgModels) {
+  const defaultImagenModels = [
+    'imagen-4.0-fast-generate-001',
+    'imagen-4.0-generate-001',
+    'imagen-3.0-generate-002'
+  ];
+
+  const genContentCandidates = Array.from(new Set([...discoveredGenContent, ...defaultGenContentModels]));
+  const imagenCandidates = Array.from(new Set([...discoveredImagen, ...defaultImagenModels]));
+  const diagnostics = [];
+
+  const cleanPrompt = String(imagePrompt || '').trim() || 'Modern vertical editorial studio background with soft dramatic lighting';
+
+  // 1) Tenta modelos Gemini Native Image via :generateContent (responseModalities: TEXT + IMAGE)
+  for (const m of genContentCandidates) {
+    if (typeof onStatus === 'function') onStatus(`Testando ${m}...`);
+    let useImageConfig = true;
+
     for (let imgAttempt = 1; imgAttempt <= 2; imgAttempt++) {
       try {
+        const generationConfig = {
+          responseModalities: ['TEXT', 'IMAGE']
+        };
+        if (useImageConfig) {
+          generationConfig.imageConfig = { aspectRatio: '9:16' };
+        }
+
         const res = await fetchWithTimeout(`${BASE_URL}/${m}:generateContent?key=${encodeURIComponent(apiKey)}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             contents: [{
               role: 'user',
-              parts: [{ text: `Create a vertical 9:16 editorial background image without any text, letters, or watermarks: ${imagePrompt}` }]
+              parts: [{ text: `Create a vertical 9:16 editorial background image without any text, letters, numbers, logos, or watermarks: ${cleanPrompt}` }]
             }],
-            generationConfig: {
-              responseModalities: ['IMAGE', 'TEXT']
-            }
+            generationConfig
           })
-        }, 30000);
-        if ((res.status === 503 || res.status === 429) && imgAttempt < 2) {
-          await sleep(Math.min(1500, GEMINI_RETRY_CONFIG.baseDelayMs));
-          continue;
+        }, 35000);
+
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          const errMsg = data?.error?.message || `HTTP ${res.status}`;
+          // Se o modelo não aceita imageConfig, tenta 1x sem imageConfig
+          if (res.status === 400 && useImageConfig && /imageConfig|aspectRatio|Unknown name/i.test(errMsg)) {
+            useImageConfig = false;
+            continue;
+          }
+          diagnostics.push({ model: m, endpoint: ':generateContent', status: res.status, message: errMsg });
+
+          if (isInvalidKeyError(res.status, errMsg)) {
+            throw Object.assign(new Error(`Chave da API Gemini inválida ou sem permissão (${errMsg}).`), {
+              category: 'invalid_key',
+              diagnostics
+            });
+          }
+
+          if (res.status === 503 && imgAttempt < 2) {
+            await sleep(Math.min(1500, GEMINI_RETRY_CONFIG.baseDelayMs));
+            continue;
+          }
+          break;
         }
-        if (!res.ok) break;
-        const data = await res.json();
+
         const parts = data?.candidates?.[0]?.content?.parts || [];
         const imgPart = parts.find((p) => p.inlineData?.data);
         if (imgPart) {
+          const usage = data?.usageMetadata || {};
+          recordModelApiEvent({
+            model: m,
+            status: 'ok',
+            inputTokens: usage.promptTokenCount || 0,
+            outputTokens: usage.candidatesTokenCount || 0,
+            totalTokens: usage.totalTokenCount || 0
+          });
           const mime = imgPart.inlineData.mimeType || 'image/png';
-          return `data:${mime};base64,${imgPart.inlineData.data}`;
+          return {
+            dataUrl: `data:${mime};base64,${imgPart.inlineData.data}`,
+            modelUsed: m,
+            endpoint: ':generateContent'
+          };
         }
+        diagnostics.push({ model: m, endpoint: ':generateContent', status: 200, message: 'Resposta sem imagem inlineData.' });
         break;
-      } catch (_) {
+      } catch (err) {
+        if (err?.category === 'invalid_key') throw err;
+        diagnostics.push({ model: m, endpoint: ':generateContent', status: 0, message: err?.message || 'Erro de rede' });
         if (imgAttempt < 2) {
           await sleep(Math.min(1500, GEMINI_RETRY_CONFIG.baseDelayMs));
           continue;
@@ -2416,7 +2584,71 @@ export async function generateCoverBackground({ imagePrompt, apiKey }) {
     }
   }
 
-  throw new Error('Seu plano/região da chave Gemini não habilitou geração de imagem via API (Nano Banana) neste momento. Use o botão "Copiar Prompt" para gerar no app Gemini ou use os Fundos Estúdio / Upload de Foto aqui no app!');
+  // 2) Fallback oficial: modelos Imagen via endpoint :predict
+  for (const m of imagenCandidates) {
+    if (typeof onStatus === 'function') onStatus(`Testando ${m} (:predict)...`);
+    try {
+      const res = await fetchWithTimeout(`${BASE_URL}/${m}:predict?key=${encodeURIComponent(apiKey)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          instances: [{
+            prompt: `Vertical 9:16 editorial background photography, no text, no letters, no watermark: ${cleanPrompt}`
+          }],
+          parameters: {
+            sampleCount: 1,
+            aspectRatio: '9:16'
+          }
+        })
+      }, 35000);
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const errMsg = data?.error?.message || `HTTP ${res.status}`;
+        diagnostics.push({ model: m, endpoint: ':predict', status: res.status, message: errMsg });
+        continue;
+      }
+
+      const pred = data?.predictions?.[0];
+      const b64 = pred?.bytesBase64Encoded || pred?.image?.bytesBase64Encoded;
+      if (b64) {
+        recordModelApiEvent({ model: m, status: 'ok', inputTokens: 0, outputTokens: 0, totalTokens: 0 });
+        const mime = pred?.mimeType || 'image/png';
+        return {
+          dataUrl: `data:${mime};base64,${b64}`,
+          modelUsed: m,
+          endpoint: ':predict'
+        };
+      }
+      diagnostics.push({ model: m, endpoint: ':predict', status: 200, message: 'Predição retornou sem bytesBase64Encoded.' });
+    } catch (err) {
+      diagnostics.push({ model: m, endpoint: ':predict', status: 0, message: err?.message || 'Erro de rede' });
+    }
+  }
+
+  // 3) Diagnóstico técnico claro baseado nos erros reais retornados pela API do Google
+  const allMsgs = diagnostics.map((d) => `${d.status} ${d.message}`).join(' | ');
+  let category = 'unknown';
+  let userMessage = '';
+
+  if (/limit:\s*0|free_tier|billing|billed|paid tier|enable billing|plan and billing|quota/i.test(allMsgs)) {
+    category = 'billing_required';
+    userMessage = 'A geração de imagem via API Gemini/Imagen exige faturamento ativo (Tier 1 / API Paga) no projeto do Google AI Studio — no plano gratuito a cota de imagem via API vem zerada (limit: 0).';
+  } else if (/country|region|location is not supported|not available in your/i.test(allMsgs)) {
+    category = 'region_restricted';
+    userMessage = 'A API do Google retornou restrição geográfica/região para geração de imagem nesta chave.';
+  } else if (diagnostics.length && diagnostics.every((d) => d.status === 404)) {
+    category = 'model_not_found';
+    userMessage = 'Nenhum dos modelos de imagem testados foi encontrado/liberado para esta chave na API v1beta.';
+  } else {
+    userMessage = 'Não foi possível gerar a imagem via API Gemini/Imagen com esta chave neste momento.';
+  }
+
+  throw Object.assign(new Error(userMessage), {
+    category,
+    diagnostics,
+    discoveredImageModels: [...discoveredGenContent, ...discoveredImagen]
+  });
 }
 
 // ============================================================================

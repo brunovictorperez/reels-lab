@@ -15,7 +15,7 @@
   <link rel="icon" type="image/png" sizes="512x512" href="./icon-512.png?v=8" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Anton&family=Bebas+Neue&family=Instrument+Serif:ital@0;1&family=Inter:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400;1,700&family=Montserrat:ital,wght@0,400;0,700;0,800;0,900;1,700&family=Oswald:wght@600;700&family=Playfair+Display:ital,wght@0,400;0,700;0,800;1,400;1,700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
@@ -559,6 +559,12 @@
                     <input type="text" id="f_qLifeChange" class="input" placeholder="Benefício concreto que ela conquista" />
                   </div>
                 </details>
+
+                <div class="form-group mt-12">
+                  <label for="f_customInstructions">📝 Instruções Personalizadas para a IA (opcional)</label>
+                  <textarea id="f_customInstructions" class="input" rows="3" placeholder="Ex: Use tom mais provocativo, inclua um exemplo prático real, evite falar de preço, finalize pedindo comentário com a palavra GUIA..."></textarea>
+                  <div class="muted-xs mt-6">Orientações livres aplicadas apenas nesta geração — não altera o DNA principal do criador.</div>
+                </div>
               </div>
 
               <!-- STEP 3 -->
@@ -631,17 +637,143 @@
                 <div class="cover-studio-grid">
                   <div class="cover-controls">
                     <div class="form-group">
-                      <label>Headline na Capa</label>
+                      <div class="label-between">
+                        <label for="cov_headline">Headline na Capa</label>
+                        <button type="button" id="cov_resetStyleBtn" class="btn btn-secondary btn-xs" title="Restaurar tipografia e selo padrão do estilo escolhido">↺ Padrão do Estilo</button>
+                      </div>
                       <textarea id="cov_headline" class="input" rows="2" placeholder="Headline curta e curiosa..."></textarea>
+                      <div class="muted-xs mt-6">Selecione palavras no texto acima ou clique em uma palavra abaixo para formatar separadamente:</div>
+                      <div id="cov_wordChips" class="cov-word-chips mt-6"></div>
                     </div>
+
+                    <!-- FORMATAÇÃO POR SELEÇÃO DE PALAVRAS -->
+                    <div id="cov_selectionStyleBox" class="sub-card cov-panel">
+                      <div class="label-between">
+                        <span class="cov-panel-title">✨ Estilo da Palavra / Seleção</span>
+                        <span id="cov_selectionLabel" class="badge-pill">Nenhuma seleção</span>
+                      </div>
+                      <div id="cov_selectionControls" class="cov-sel-controls hidden mt-8">
+                        <div class="cov-toolbar-row">
+                          <label class="cov-mini-field">
+                            <span>Cor</span>
+                            <input type="color" id="cov_selColor" class="input color-input-sm" value="#FFE600" />
+                          </label>
+                          <div class="cov-toggle-group" role="group" aria-label="Estilo da seleção">
+                            <button type="button" id="cov_selBoldBtn" class="btn btn-secondary btn-xs cov-style-btn" title="Negrito na seleção"><strong>B</strong></button>
+                            <button type="button" id="cov_selItalicBtn" class="btn btn-secondary btn-xs cov-style-btn" title="Itálico na seleção"><em>I</em></button>
+                            <button type="button" id="cov_selUnderlineBtn" class="btn btn-secondary btn-xs cov-style-btn" title="Sublinhado na seleção"><u>U</u></button>
+                          </div>
+                          <label class="cov-mini-field flex-1">
+                            <span>Tamanho: <strong id="cov_selSizeScaleVal">100%</strong></span>
+                            <input type="range" id="cov_selSizeScale" min="80" max="180" step="5" value="100" />
+                          </label>
+                        </div>
+                        <div class="cov-toolbar-row mt-8">
+                          <label class="cov-mini-field">
+                            <span>Contorno</span>
+                            <input type="color" id="cov_selStrokeColor" class="input color-input-sm" value="#000000" />
+                          </label>
+                          <label class="cov-mini-field flex-1">
+                            <span>Espessura contorno: <strong id="cov_selStrokeWidthVal">0px</strong></span>
+                            <input type="range" id="cov_selStrokeWidth" min="0" max="24" step="1" value="0" />
+                          </label>
+                          <button type="button" id="cov_clearSelSpanBtn" class="btn btn-secondary btn-xs" title="Remover estilo desta palavra">✕ Limpar palavra</button>
+                        </div>
+                      </div>
+                      <div id="cov_selectionEmptyHint" class="muted-xs mt-6">
+                        Dica: clique em qualquer palavra acima (ex: <em>PERDENDO</em>) ou arraste para selecionar um trecho e aplicar cor, negrito, itálico, tamanho maior e contorno exclusivo.
+                      </div>
+                      <div id="cov_spansSummaryBar" class="inline-controls mt-8 hidden">
+                        <span id="cov_spansCountLabel" class="muted-xs"></span>
+                        <button type="button" id="cov_clearAllSpansBtn" class="btn btn-secondary btn-xs">🧹 Limpar todos destaques</button>
+                      </div>
+                    </div>
+
+                    <!-- FORMATAÇÃO GLOBAL DA HEADLINE -->
+                    <details class="sub-card cov-panel" open>
+                      <summary class="cov-panel-summary">🔤 Formatação Global da Headline</summary>
+                      <div class="grid-2-tight mt-8">
+                        <div class="form-group" style="margin-bottom:8px;">
+                          <label for="cov_fontFamily">Fonte</label>
+                          <select id="cov_fontFamily" class="input"></select>
+                        </div>
+                        <div class="form-group" style="margin-bottom:8px;">
+                          <label for="cov_textTransform">Caixa do Texto</label>
+                          <select id="cov_textTransform" class="input">
+                            <option value="none">Normal (como digitado)</option>
+                            <option value="uppercase">CAIXA ALTA</option>
+                            <option value="lowercase">caixa baixa</option>
+                            <option value="capitalize">Primeira Maiúscula</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      <div class="cov-toolbar-row">
+                        <label class="cov-mini-field">
+                          <span>Cor</span>
+                          <input type="color" id="cov_textColor" class="input color-input-sm" value="#1D1D1F" />
+                        </label>
+                        <div class="cov-toggle-group" role="group" aria-label="Estilo global">
+                          <button type="button" id="cov_boldBtn" class="btn btn-secondary btn-xs cov-style-btn active" title="Negrito global"><strong>B</strong></button>
+                          <button type="button" id="cov_italicBtn" class="btn btn-secondary btn-xs cov-style-btn" title="Itálico global"><em>I</em></button>
+                          <button type="button" id="cov_underlineBtn" class="btn btn-secondary btn-xs cov-style-btn" title="Sublinhado global"><u>U</u></button>
+                        </div>
+                        <label class="cov-mini-field flex-1">
+                          <span>Tamanho: <strong id="cov_fontSizeVal">88px</strong></span>
+                          <input type="range" id="cov_fontSize" min="44" max="148" step="2" value="88" />
+                        </label>
+                      </div>
+
+                      <div class="grid-2-tight mt-8">
+                        <label class="cov-mini-field">
+                          <span>Espaçamento letras: <strong id="cov_letterSpacingVal">-1px</strong></span>
+                          <input type="range" id="cov_letterSpacing" min="-4" max="20" step="1" value="-1" />
+                        </label>
+                        <label class="cov-mini-field">
+                          <span>Entrelinha: <strong id="cov_lineHeightVal">1.18x</strong></span>
+                          <input type="range" id="cov_lineHeight" min="0.95" max="1.6" step="0.05" value="1.18" />
+                        </label>
+                      </div>
+
+                      <div class="cov-toolbar-row mt-8">
+                        <label class="cov-mini-field">
+                          <span>Cor Contorno</span>
+                          <input type="color" id="cov_strokeColor" class="input color-input-sm" value="#000000" />
+                        </label>
+                        <label class="cov-mini-field flex-1">
+                          <span>Contorno global: <strong id="cov_strokeWidthVal">0px</strong></span>
+                          <input type="range" id="cov_strokeWidth" min="0" max="22" step="1" value="0" />
+                        </label>
+                      </div>
+                    </details>
+
+                    <!-- ESTILO DA CAPA & SELO -->
                     <div class="grid-2-tight">
                       <div class="form-group">
-                        <label>Selo da Série</label>
-                        <input type="text" id="cov_seriesLabel" class="input" />
+                        <label for="cov_template">Estilo da Capa</label>
+                        <select id="cov_template" class="input"></select>
                       </div>
                       <div class="form-group">
-                        <label>Estilo da Capa</label>
-                        <select id="cov_template" class="input"></select>
+                        <label for="cov_seriesLabel">Texto do Selo da Série</label>
+                        <input type="text" id="cov_seriesLabel" class="input" />
+                      </div>
+                    </div>
+
+                    <div class="sub-card cov-panel">
+                      <div class="cov-panel-title" style="margin-bottom:8px;">🏷️ Aparência do Selo (Cor &amp; Transparência)</div>
+                      <div class="cov-toolbar-row">
+                        <label class="cov-mini-field">
+                          <span>Cor do Selo</span>
+                          <input type="color" id="cov_badgeColor" class="input color-input-sm" value="#FFFFFF" />
+                        </label>
+                        <label class="cov-mini-field">
+                          <span>Cor Texto</span>
+                          <input type="color" id="cov_badgeTextColor" class="input color-input-sm" value="#1D1D1F" />
+                        </label>
+                        <label class="cov-mini-field flex-1">
+                          <span>Opacidade: <strong id="cov_badgeOpacityVal">88%</strong></span>
+                          <input type="range" id="cov_badgeOpacity" min="0" max="100" step="2" value="88" />
+                        </label>
                       </div>
                     </div>
 
@@ -649,26 +781,33 @@
                       <label>Prompt para Fundo por IA</label>
                       <textarea id="o_coverImagePrompt" class="input" rows="3" placeholder="Prompt visual gerado pela IA..."></textarea>
                       <div class="inline-controls mt-6">
-                        <button id="generateCoverAiBgBtn" class="btn btn-gradient btn-sm">✨ Gerar Fundo com IA</button>
-                        <button class="btn btn-secondary btn-sm copy-btn" data-copy="o_coverImagePrompt">📋 Copiar Prompt</button>
+                        <button type="button" id="generateCoverAiBgBtn" class="btn btn-gradient btn-sm">✨ Gerar Fundo com IA</button>
+                        <button type="button" class="btn btn-secondary btn-sm copy-btn" data-copy="o_coverImagePrompt">📋 Copiar Prompt</button>
                       </div>
+                      <div id="coverAiBgDiagBox" class="sub-card hidden mt-8"></div>
                     </div>
 
                     <div class="form-group">
                       <label>Ou envie sua própria foto / frame do vídeo</label>
                       <div class="inline-controls">
                         <input type="file" id="cov_uploadBg" accept="image/*" class="input-file" />
-                        <button id="cov_clearBgBtn" class="btn btn-secondary btn-sm">Usar Fundo Estúdio</button>
+                        <button type="button" id="cov_clearBgBtn" class="btn btn-secondary btn-sm">Usar Fundo Estúdio</button>
                       </div>
                     </div>
 
-                    <label class="checkbox-row">
-                      <input type="checkbox" id="cov_safeZoneToggle" checked />
-                      <span>Mostrar guia Área Segura do Feed (4:5)</span>
-                    </label>
+                    <div class="cov-toggles-stack">
+                      <label class="checkbox-row cov-bg-only-row">
+                        <input type="checkbox" id="cov_backgroundOnlyToggle" />
+                        <span><strong>🖼️ Modo "Somente Fundo"</strong> (ocultar headline, selo, ícones e overlays)</span>
+                      </label>
+                      <label class="checkbox-row">
+                        <input type="checkbox" id="cov_safeZoneToggle" checked />
+                        <span>Mostrar guia Área Segura do Feed (4:5)</span>
+                      </label>
+                    </div>
 
                     <div class="inline-controls mt-12">
-                      <button id="downloadCoverBtn" class="btn btn-primary">⬇️ Salvar Capa PNG (Rolo da Câmera / Download)</button>
+                      <button type="button" id="downloadCoverBtn" class="btn btn-primary">⬇️ Salvar Capa PNG (Rolo da Câmera / Download)</button>
                     </div>
                   </div>
 
@@ -956,20 +1095,24 @@
         <div id="ai-tab-limits" class="subtab-panel">
           <div class="rate-limit-toolbar">
             <div class="inline-controls">
-              <span id="rateLimitResetBadge" class="badge-pill">⏰ Renova em --</span>
+              <span id="rateLimitResetBadge" class="badge-pill">⏰ Renovação em --</span>
+              <span id="rateLimitUpdatedBadge" class="muted-xs"></span>
+            </div>
+            <div class="inline-controls">
               <div class="segmented-mini" title="Referência de limites do seu projeto no AI Studio">
                 <button type="button" id="rateLimitTierFreeBtn" class="seg-mini-btn active">Plano Grátis (Free)</button>
                 <button type="button" id="rateLimitTierPaidBtn" class="seg-mini-btn">API Paga (Tier 1)</button>
               </div>
-            </div>
-            <div class="inline-controls">
-              <a href="https://aistudio.google.com/rate-limit" target="_blank" rel="noopener noreferrer" class="btn btn-secondary btn-xs">↗ AI Studio Rate Limit</a>
-              <button type="button" id="resetRateLimitUsageBtn" class="btn btn-secondary btn-xs">↺ Zerar uso local</button>
+              <button type="button" id="probeAllRateLimitBtn" class="btn btn-primary btn-xs">⚡ Testar Todos</button>
+              <a href="https://aistudio.google.com/rate-limit" target="_blank" rel="noopener noreferrer" class="btn btn-secondary btn-xs">↗ AI Studio</a>
+              <button type="button" id="resetRateLimitUsageBtn" class="btn btn-secondary btn-xs">↺ Zerar uso</button>
             </div>
           </div>
 
+          <div id="rateLimitSummaryCards" class="rl-summary-grid mt-12"></div>
+
           <div class="info-banner mt-12">
-            <strong>Como este painel funciona:</strong> a API pública do Google não envia um endpoint com sua cota restante exata em tempo real; por isso o Reels Lab mede suas requisições reais deste aparelho (<strong>RPM</strong> no último minuto, <strong>TPM</strong> em tokens reais retornados pela API e <strong>RPD</strong> no dia do Pacífico — renova às 00h PT) mais os avisos reais de cota <code>429</code>. Para ver o consolidado do projeto em todos os apps, abra o link oficial do <strong>AI Studio Rate Limit</strong> acima.
+            <strong>Telemetria em tempo real:</strong> este painel atualiza automaticamente sempre que você abre <strong>📊 Limites &amp; Uso (Rate Limit)</strong> e acompanha a janela móvel de 1 minuto (<strong>RPM</strong> e <strong>TPM</strong>) e a cota diária (<strong>RPD</strong>, que renova às 00h PT) com base nas chamadas reais deste aparelho e nos retornos da API do Google.
           </div>
 
           <div id="rateLimitTableWrap" class="rate-limit-table-wrap mt-12"></div>
