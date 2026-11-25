@@ -1238,6 +1238,18 @@ textarea.input {
   gap: 12px;
 }
 
+.portal-search-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.portal-search-bar .input {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
 .portal-tabs,
 .portal-subtabs {
   display: flex;

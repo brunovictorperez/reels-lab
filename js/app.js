@@ -20,6 +20,7 @@ import {
   inferCreatorDefaultCategory,
   fetchGoogleNewsPortal,
   generateAnglesFromSelectedNews,
+  detectBestSeriesModelId,
   formatTrendDate,
   generateCompleteEpisode,
   generateSeriesIdeas,
@@ -51,6 +52,7 @@ const portalCategoryCache = new Map();
 let activePortalCategory = 'brasil';
 let activePortalSubCategory = 'todas';
 let activePortalDateFilter = 'any';
+let activePortalSearchQuery = '';
 let currentAttachedNews = null;
 
 // Teleprompter state
@@ -936,7 +938,7 @@ function getPortalCacheKey(catId, subCatId, dateFilter, focusQuery = '') {
 function getCurrentPortalArticlesList() {
   const cId = getActiveCreator()?.id;
   const cached = state.hotTopicsCache?.[cId];
-  const focusQ = cached?.focusQuery || document.getElementById('radarQueryInput')?.value.trim() || '';
+  const focusQ = activePortalSearchQuery || cached?.focusQuery || document.getElementById('radarPortalSearchInput')?.value.trim() || document.getElementById('radarQueryInput')?.value.trim() || '';
   const key = getPortalCacheKey(activePortalCategory, activePortalSubCategory, activePortalDateFilter, focusQ);
   if (portalCategoryCache.has(key)) {
     return portalCategoryCache.get(key) || [];
@@ -967,7 +969,7 @@ async function loadPortalCategoryArticles() {
   const cId = getActiveCreator()?.id;
   const cached = state.hotTopicsCache?.[cId];
   const focusQ = activePortalCategory === 'busca'
-    ? (cached?.focusQuery || document.getElementById('radarQueryInput').value.trim())
+    ? (activePortalSearchQuery || document.getElementById('radarPortalSearchInput')?.value.trim() || cached?.focusQuery || document.getElementById('radarQueryInput').value.trim())
     : '';
 
   if (listEl) {
@@ -1013,6 +1015,54 @@ function wireRadarTab() {
 
   document.getElementById('refreshPortalBtn').addEventListener('click', () => {
     loadPortalCategoryArticles();
+  });
+
+  const portalSearchInput = document.getElementById('radarPortalSearchInput');
+  const clearPortalSearchBtn = document.getElementById('clearPortalSearchBtn');
+
+  const triggerPortalSearch = () => {
+    const q = (portalSearchInput?.value || '').trim();
+    if (!q) {
+      activePortalSearchQuery = '';
+      if (clearPortalSearchBtn) clearPortalSearchBtn.classList.add('hidden');
+      activePortalCategory = inferCreatorDefaultCategory(getActiveCreator());
+      const defaultKey = getPortalCacheKey(activePortalCategory, activePortalSubCategory, activePortalDateFilter, '');
+      if (portalCategoryCache.has(defaultKey)) {
+        renderRadarPortal();
+      } else {
+        loadPortalCategoryArticles();
+      }
+      return;
+    }
+    activePortalSearchQuery = q;
+    activePortalCategory = 'busca';
+    if (clearPortalSearchBtn) clearPortalSearchBtn.classList.remove('hidden');
+    loadPortalCategoryArticles();
+  };
+
+  document.getElementById('radarPortalSearchBtn').addEventListener('click', triggerPortalSearch);
+  portalSearchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      triggerPortalSearch();
+    }
+  });
+  portalSearchInput.addEventListener('input', () => {
+    if (!portalSearchInput.value.trim() && activePortalSearchQuery) {
+      triggerPortalSearch();
+    }
+  });
+  clearPortalSearchBtn.addEventListener('click', () => {
+    portalSearchInput.value = '';
+    activePortalSearchQuery = '';
+    clearPortalSearchBtn.classList.add('hidden');
+    activePortalCategory = inferCreatorDefaultCategory(getActiveCreator());
+    const defaultKey = getPortalCacheKey(activePortalCategory, activePortalSubCategory, activePortalDateFilter, '');
+    if (portalCategoryCache.has(defaultKey)) {
+      renderRadarPortal();
+    } else {
+      loadPortalCategoryArticles();
+    }
   });
 
   document.getElementById('clearSelectedNewsBtn').addEventListener('click', () => {
@@ -1095,6 +1145,12 @@ function wireRadarTab() {
       );
 
       const cId = activeCreator.id;
+      activePortalSearchQuery = query;
+      const portalSearchInput = document.getElementById('radarPortalSearchInput');
+      const clearPortalSearchBtn = document.getElementById('clearPortalSearchBtn');
+      if (portalSearchInput) portalSearchInput.value = query;
+      if (clearPortalSearchBtn) clearPortalSearchBtn.classList.toggle('hidden', !query);
+
       activePortalCategory = result.activeCategory || (query ? 'busca' : inferCreatorDefaultCategory(activeCreator));
       activePortalSubCategory = result.activeSubCategory || 'todas';
       if (result.portalByCategory && typeof result.portalByCategory === 'object') {
@@ -1137,9 +1193,19 @@ function renderRadarPortal() {
     dateSel.value = activePortalDateFilter;
   }
 
+  const portalSearchInput = document.getElementById('radarPortalSearchInput');
+  const clearPortalSearchBtn = document.getElementById('clearPortalSearchBtn');
+  const effectiveSearchQ = activePortalSearchQuery || cached?.focusQuery || '';
+  if (portalSearchInput && portalSearchInput.value !== effectiveSearchQ && effectiveSearchQ) {
+    portalSearchInput.value = effectiveSearchQ;
+  }
+  if (clearPortalSearchBtn) {
+    clearPortalSearchBtn.classList.toggle('hidden', !(portalSearchInput?.value.trim() || effectiveSearchQ));
+  }
+
   const tabs = [...GOOGLE_NEWS_CATEGORIES];
-  if (cached?.focusQuery) {
-    tabs.unshift({ id: 'busca', label: `🔍 Busca: ${cached.focusQuery}` });
+  if (effectiveSearchQ) {
+    tabs.unshift({ id: 'busca', label: `🔍 Busca: ${effectiveSearchQ}` });
   } else if (activePortalCategory === 'busca') {
     activePortalCategory = inferCreatorDefaultCategory(getActiveCreator());
   }
@@ -1156,7 +1222,7 @@ function renderRadarPortal() {
       if (activePortalCategory !== 'entretenimento') {
         activePortalSubCategory = 'todas';
       }
-      const focusQ = activePortalCategory === 'busca' ? (cached?.focusQuery || '') : '';
+      const focusQ = activePortalCategory === 'busca' ? effectiveSearchQ : '';
       const cacheKey = getPortalCacheKey(activePortalCategory, activePortalSubCategory, activePortalDateFilter, focusQ);
       if (portalCategoryCache.has(cacheKey)) {
         selectedPortalArticleUrls.clear();
@@ -1320,13 +1386,20 @@ function renderCachedHotTopics() {
         ${(topic.angles || []).map((ang) => {
           const funnelTag = ang.funnel === 'fundo' ? 'tag-fundo' : ang.funnel === 'meio' ? 'tag-meio' : 'tag-topo';
           const funnelLabel = ang.funnel === 'fundo' ? 'FUNDO (Venda)' : ang.funnel === 'meio' ? 'MEIO (Conexão)' : 'TOPO (Alcance <30s)';
+          const resolvedModelId = detectBestSeriesModelId({
+            title: ang.title || '',
+            funnel: ang.funnel || '',
+            suggestedModelId: ang.modelId || '',
+            bridge: topic.bubbleBridge || ''
+          });
+          const resolvedModelObj = SERIES_MODELS.find((m) => m.id === resolvedModelId);
           return `
             <div class="angle-item">
-              <span class="angle-tag ${funnelTag}">${funnelLabel}</span>
+              <span class="angle-tag ${funnelTag}">${funnelLabel}${resolvedModelObj ? ` • ${escapeHtml(resolvedModelObj.code)}` : ''}</span>
               <div class="angle-title">${escapeHtml(ang.title)}</div>
               <button class="btn btn-secondary btn-sm mt-6 use-trend-btn"
                 data-title="${escapeHtml(ang.title)}"
-                data-model="${escapeHtml(ang.modelId || 'codigo_viral')}"
+                data-model="${escapeHtml(resolvedModelId)}"
                 data-funnel="${escapeHtml(ang.funnel || 'topo')}"
                 data-bridge="${escapeHtml(topic.bubbleBridge || '')}"
                 data-news-url="${escapeHtml(topic.sourceUrl || '')}"
@@ -1354,13 +1427,20 @@ function renderCachedHotTopics() {
         publishedAt: btn.dataset.newsDate || '',
         summary: btn.dataset.newsSummary || ''
       });
-      document.getElementById('f_modelSelect').value = btn.dataset.model;
+      const bestModelId = detectBestSeriesModelId({
+        title: btn.dataset.title || '',
+        funnel: btn.dataset.funnel || '',
+        suggestedModelId: btn.dataset.model || '',
+        bridge: btn.dataset.bridge || ''
+      });
+      const bestModelObj = SERIES_MODELS.find((m) => m.id === bestModelId);
+      document.getElementById('f_modelSelect').value = bestModelId;
       document.getElementById('f_funnelStage').value = btn.dataset.funnel;
       document.getElementById('f_topic').value = btn.dataset.title;
       document.getElementById('f_qProblem').value = btn.dataset.bridge;
       updateModelRuleHint();
       switchTab('tab-factory');
-      showToast('Notícia anexada! Gere direto sem pasta ou escolha Pasta e Parte no Passo 1.', 'ok');
+      showToast(`Notícia anexada com modelo ${bestModelObj?.code || bestModelId}! Gere sem pasta ou escolha no Passo 1.`, 'ok');
     });
   });
 
@@ -1555,8 +1635,12 @@ function renderQuickFillProfIdeas(profId) {
 
   box.querySelectorAll('.qf-chip').forEach((btn) => {
     btn.addEventListener('click', () => {
+      const bestModelId = detectBestSeriesModelId({
+        title: btn.dataset.topic || '',
+        suggestedModelId: btn.dataset.model || ''
+      });
       document.getElementById('f_topic').value = btn.dataset.topic;
-      document.getElementById('f_modelSelect').value = btn.dataset.model;
+      document.getElementById('f_modelSelect').value = bestModelId;
       document.getElementById('f_partNumber').value = btn.dataset.part;
       // Match existing series folder if imported
       const matchingSerie = getCreatorSeries().find((s) => s.name === btn.dataset.series);
@@ -1853,6 +1937,14 @@ function wireFactoryTab() {
           document.getElementById('f_qProblem').value = pBtn.dataset.p;
           document.getElementById('f_qLearn').value = pBtn.dataset.l;
           document.getElementById('f_qLifeChange').value = pBtn.dataset.c;
+          if (!document.getElementById('f_seriesSelect').value) {
+            document.getElementById('f_modelSelect').value = detectBestSeriesModelId({
+              title: pBtn.dataset.topic || '',
+              suggestedModelId: document.getElementById('f_modelSelect').value,
+              bridge: pBtn.dataset.p || ''
+            });
+            updateModelRuleHint();
+          }
           box.classList.add('hidden');
         });
       });
@@ -2975,7 +3067,11 @@ function renderCatalog() {
   grid.querySelectorAll('.use-cat-part').forEach((btn) => {
     btn.addEventListener('click', () => {
       clearFactoryFields();
-      document.getElementById('f_modelSelect').value = btn.dataset.model;
+      const bestModelId = detectBestSeriesModelId({
+        title: btn.dataset.topic || '',
+        suggestedModelId: btn.dataset.model || ''
+      });
+      document.getElementById('f_modelSelect').value = bestModelId;
       document.getElementById('f_partNumber').value = btn.dataset.part;
       document.getElementById('f_topic').value = btn.dataset.topic;
       updateModelRuleHint();

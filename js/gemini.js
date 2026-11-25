@@ -1170,6 +1170,53 @@ export async function fetchGoogleNewsAllCategories({ dateFilter = 'any', driveWe
   };
 }
 
+export function detectBestSeriesModelId({ title = '', funnel = '', suggestedModelId = '', bridge = '' } = {}) {
+  const cleanTitle = String(title || '').trim();
+  const combined = `${cleanTitle} ${String(bridge || '')}`;
+
+  // 1. Padrão estrutural explícito no título/gancho
+  if (/o que tod[oa]s? .*deveria|deveriam? fazer.*mas n[ãa]o|todo mundo .*deveria .*mas n[ãa]o/i.test(cleanTitle)) {
+    return 'serie_01';
+  }
+  if (/^\s*comece a\b|\bcomece a\b|primeiro passo para|aplique hoje|passo simples para come[çc]ar/i.test(cleanTitle)) {
+    return 'serie_02';
+  }
+  if (/^\s*a (?:pessoa|mulher|m[ãa]e|profissional|cliente|dona|empres[áa]ri[ao]) que\b|^\s*o (?:homem|cliente|pai|profissional|dono|corretor|m[ée]dico|advogado|arquiteto) que\b|\bn[ãa]o deveria (?:achar|estranhar|fazer|reclamar)/i.test(cleanTitle)) {
+    return 'serie_03';
+  }
+  if (/^\s*como\b.*\bsem\b|\bsem precisar\b|\bsem gastar\b|\bsem sofrer\b|\bsem complicar\b/i.test(cleanTitle)) {
+    return 'serie_04';
+  }
+  if (/^\s*quem quer\b|deveria fazer isso aqui|\bquem busca\b.*deveria/i.test(cleanTitle)) {
+    return 'serie_05';
+  }
+
+  // 2. Normalização do modelId sugerido pela IA ou catálogo
+  const raw = String(suggestedModelId || '').trim().toLowerCase();
+  if (raw) {
+    const serieMatch = raw.match(/s[ée]rie[\s_-]*0?([1-5])|serie[\s_-]*0?([1-5])/i);
+    if (serieMatch) {
+      const num = serieMatch[1] || serieMatch[2];
+      return `serie_0${num}`;
+    }
+    if (/c[óo]digo[\s_-]*viral|timing|viral/i.test(raw)) {
+      return 'codigo_viral';
+    }
+    if (SERIES_MODELS.some((m) => m.id === raw)) {
+      return raw;
+    }
+  }
+
+  // 3. Fallback por intenção e funil
+  const normFunnel = String(funnel || '').toLowerCase();
+  if (/urgente|alerta|cuidado|segredo|verdade|mentira|muda tudo|nova lei|nova regra|taxa|por que ningu[ée]m/i.test(combined) || normFunnel === 'topo') {
+    return 'codigo_viral';
+  }
+  if (normFunnel === 'fundo') return 'serie_05';
+  if (normFunnel === 'meio') return 'serie_03';
+  return 'codigo_viral';
+}
+
 export async function generateAnglesFromSelectedNews({ creator, articles = [], focusQuery = '', count = 5, apiKey, modelName = 'gemini-4-hydrogen', onStatus = null }) {
   if (!apiKey) {
     throw new Error('Configure sua Gemini API Key antes de gerar roteiros.');
@@ -1202,7 +1249,14 @@ REGRAS ESTRITAS:
     ? `Gere EXATAMENTE ${targetCount} conteúdos (um para cada notícia selecionada acima).`
     : `Escolha as ${targetCount} notícias mais relevantes para conectar com a bolha e o público do criador acima (preferindo notícias com ótimo potencial de "O Timing" do Código Viral).`}
 3. Em cada item, informe exatamente o "sourceIndex" correspondente (número de 1 a ${feedSlice.length}), sem repetir a mesma notícia.
-4. Para cada notícia escolhida, faça uma "bubbleBridge" conectando esse assunto real à bolha do criador sem parecer página de fofoca, e crie 3 ângulos de Reels (Topo=Descoberta <30s, Meio=Conexão 30-45s, Fundo=Venda 45-60s) escolhendo entre: serie_01, serie_02, serie_03, serie_04, serie_05 ou codigo_viral.
+4. Para cada notícia escolhida, faça uma "bubbleBridge" conectando esse assunto real à bolha do criador sem parecer página de fofoca, e crie 3 ângulos de Reels (Topo=Descoberta <30s, Meio=Conexão 30-45s, Fundo=Venda 45-60s).
+5. Escolha EXATAMENTE o "modelId" mais fiel ao estilo do título/ângulo criado:
+- "codigo_viral": notícia quente, alerta, segredo, quebra de padrão, descoberta rápida (<30s).
+- "serie_01": formato "O que toda pessoa que [situação] deveria fazer, mas não faz".
+- "serie_02": formato "Comece a [ação prática imediata]...".
+- "serie_03": formato "A pessoa que [situação cotidiana]..." (identificação extrema).
+- "serie_04": formato "Como [resultado] sem [dificuldade comum]".
+- "serie_05": formato "Quem quer [desejo específico] deveria fazer isso aqui" (ótimo para fundo/venda).
 
 Responda APENAS com JSON válido no formato:
 {
@@ -1243,8 +1297,18 @@ Responda APENAS com JSON válido no formato:
     }
     usedIndexes.add(refIdx);
     const matched = feedSlice[refIdx - 1];
+    const normalizedAngles = (t.angles || []).map((ang) => ({
+      ...ang,
+      modelId: detectBestSeriesModelId({
+        title: ang?.title || '',
+        funnel: ang?.funnel || '',
+        suggestedModelId: ang?.modelId || '',
+        bridge: t?.bubbleBridge || ''
+      })
+    }));
     return {
       ...t,
+      angles: normalizedAngles,
       sourceIndex: refIdx,
       sourceName: matched?.sourceName || 'Google Notícias',
       publishedAt: matched?.publishedAt || formatTrendDate(matched?.pubDate),
