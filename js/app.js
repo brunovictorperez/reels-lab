@@ -1091,8 +1091,16 @@ function wireRadarTab() {
       const cId = activeCreator.id;
       activePortalCategory = result.activeCategory || (query ? 'busca' : inferCreatorDefaultCategory(activeCreator));
       activePortalSubCategory = result.activeSubCategory || 'todas';
-      const cacheKey = getPortalCacheKey(activePortalCategory, activePortalSubCategory, dateFilter, query);
-      portalCategoryCache.set(cacheKey, result.portalArticles || []);
+      if (result.portalByCategory && typeof result.portalByCategory === 'object') {
+        Object.entries(result.portalByCategory).forEach(([catId, items]) => {
+          const catKey = getPortalCacheKey(catId, 'todas', dateFilter, '');
+          portalCategoryCache.set(catKey, items || []);
+        });
+      }
+      if (activePortalCategory === 'busca' || !result.portalByCategory) {
+        const cacheKey = getPortalCacheKey(activePortalCategory, activePortalSubCategory, dateFilter, query);
+        portalCategoryCache.set(cacheKey, result.portalArticles || []);
+      }
       selectedPortalArticleUrls.clear();
 
       state.hotTopicsCache[cId] = result;
@@ -1100,6 +1108,11 @@ function wireRadarTab() {
       renderCachedHotTopics();
       showToast('Radar atualizado com 5 conteúdos reais do Google Notícias!', 'ok');
     } catch (err) {
+      const banner = document.getElementById('radarStatusBanner');
+      if (banner) {
+        banner.classList.remove('hidden');
+        banner.innerHTML = `⚠️ <strong>Erro no Radar:</strong> ${escapeHtml(err.message)}`;
+      }
       showToast(`Erro no Radar: ${err.message}`, 'err');
     }
   });
@@ -1245,6 +1258,14 @@ function renderCachedHotTopics() {
     activePortalDateFilter = cached.dateFilter || 'any';
     const topDateSel = document.getElementById('radarDateFilter');
     if (topDateSel) topDateSel.value = activePortalDateFilter;
+    if (cached.portalByCategory && typeof cached.portalByCategory === 'object') {
+      Object.entries(cached.portalByCategory).forEach(([catId, items]) => {
+        const catKey = getPortalCacheKey(catId, 'todas', activePortalDateFilter, '');
+        if (!portalCategoryCache.has(catKey)) {
+          portalCategoryCache.set(catKey, items || []);
+        }
+      });
+    }
     if (Array.isArray(cached.portalArticles)) {
       const key = getPortalCacheKey(activePortalCategory, activePortalSubCategory, activePortalDateFilter, cached.focusQuery || '');
       if (!portalCategoryCache.has(key)) {

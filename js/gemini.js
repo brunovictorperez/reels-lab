@@ -715,79 +715,86 @@ function buildGoogleNewsFeedSpecs({ categoryId = 'brasil', subCategoryId = 'toda
   };
 }
 
-async function fetchSingleRssFeed(feed, limit = 20) {
+function raceFirstNonEmpty(promises) {
+  if (typeof Promise.any === 'function') {
+    return Promise.any(promises);
+  }
+  return new Promise((resolve, reject) => {
+    let remaining = promises.length;
+    if (!remaining) return reject(new Error('empty'));
+    promises.forEach((p) => {
+      Promise.resolve(p).then(resolve, () => {
+        remaining -= 1;
+        if (remaining === 0) reject(new Error('all failed'));
+      });
+    });
+  });
+}
+
+async function fetchSingleRssFeed(feed, limit = 15) {
   const encodedUrl = encodeURIComponent(feed.url);
+  const tagItems = (items) =>
+    items.map((it) => ({
+      ...it,
+      categoryId: feed.categoryId || '',
+      categoryLabel: it.categoryLabel || feed.label || 'Google Notícias'
+    }));
 
-  // 1. AllOrigins JSON wrapper (retorna contents XML mesmo quando /raw oscila)
+  const tryXmlRelay = async (proxyUrl) => {
+    const res = await fetchWithTimeout(proxyUrl, { method: 'GET' }, 7500);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const xml = await res.text();
+    const items = parseRssXmlItems(xml, feed.label, limit);
+    if (!items.length) throw new Error('empty');
+    return tagItems(items);
+  };
+
+  const tryAllOriginsJson = async () => {
+    const res = await fetchWithTimeout(`https://api.allorigins.win/get?url=${encodedUrl}`, { method: 'GET' }, 7500);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const items = parseRssXmlItems(data?.contents || '', feed.label, limit);
+    if (!items.length) throw new Error('empty');
+    return tagItems(items);
+  };
+
+  const tryRss2Json = async () => {
+    const res = await fetchWithTimeout(`https://api.rss2json.com/v1/api.json?rss_url=${encodedUrl}`, { method: 'GET' }, 7500);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (data?.status !== 'ok' || !Array.isArray(data.items) || !data.items.length) {
+      throw new Error('empty');
+    }
+    const mapped = data.items.slice(0, limit).map((item) => {
+      const rawTitle = String(item.title || '').trim();
+      const cleanTitle = rawTitle.replace(/\s+-\s+[^-]+$/, '').trim() || rawTitle;
+      const inferredSrc = rawTitle.match(/\s+-\s+([^-]+)$/)?.[1]?.trim();
+      const desc = decodeXmlEntities(item.description || '');
+      return {
+        title: decodeXmlEntities(cleanTitle),
+        link: String(item.link || '').trim(),
+        pubDate: String(item.pubDate || '').trim(),
+        publishedAt: formatTrendDate(item.pubDate),
+        sourceName: decodeXmlEntities(item.author || inferredSrc || feed.label),
+        summary: desc && desc.toLowerCase() !== cleanTitle.toLowerCase() ? desc.slice(0, 240) : '',
+        channel: feed.label
+      };
+    }).filter((it) => it.title);
+    if (!mapped.length) throw new Error('empty');
+    return tagItems(mapped);
+  };
+
   try {
-    const res = await fetchWithTimeout(`https://api.allorigins.win/get?url=${encodedUrl}`, { method: 'GET' }, 8500);
-    if (res.ok) {
-      const data = await res.json();
-      const items = parseRssXmlItems(data?.contents || '', feed.label, limit);
-      if (items.length) return items;
-    }
+    return await raceFirstNonEmpty([
+      tryAllOriginsJson(),
+      tryXmlRelay(`https://api.codetabs.com/v1/proxy?quest=${encodedUrl}`),
+      tryRss2Json(),
+      tryXmlRelay(`https://api.allorigins.win/raw?url=${encodedUrl}`),
+      tryXmlRelay(`https://corsproxy.io/?${encodedUrl}`)
+    ]);
   } catch {
-    // Tenta próximo relay
+    return [];
   }
-
-  // 2. CodeTabs Proxy
-  try {
-    const res = await fetchWithTimeout(`https://api.codetabs.com/v1/proxy?quest=${encodedUrl}`, { method: 'GET' }, 8500);
-    if (res.ok) {
-      const xml = await res.text();
-      const items = parseRssXmlItems(xml, feed.label, limit);
-      if (items.length) return items;
-    }
-  } catch {
-    // Tenta próximo relay
-  }
-
-  // 3. RSS2JSON API
-  try {
-    const res = await fetchWithTimeout(`https://api.rss2json.com/v1/api.json?rss_url=${encodedUrl}`, { method: 'GET' }, 8500);
-    if (res.ok) {
-      const data = await res.json();
-      if (data?.status === 'ok' && Array.isArray(data.items) && data.items.length) {
-        return data.items.slice(0, limit).map((item) => {
-          const rawTitle = String(item.title || '').trim();
-          const cleanTitle = rawTitle.replace(/\s+-\s+[^-]+$/, '').trim() || rawTitle;
-          const inferredSrc = rawTitle.match(/\s+-\s+([^-]+)$/)?.[1]?.trim();
-          const desc = decodeXmlEntities(item.description || '');
-          return {
-            title: decodeXmlEntities(cleanTitle),
-            link: String(item.link || '').trim(),
-            pubDate: String(item.pubDate || '').trim(),
-            publishedAt: formatTrendDate(item.pubDate),
-            sourceName: decodeXmlEntities(item.author || inferredSrc || feed.label),
-            summary: desc && desc.toLowerCase() !== cleanTitle.toLowerCase() ? desc.slice(0, 240) : '',
-            channel: feed.label
-          };
-        }).filter((it) => it.title);
-      }
-    }
-  } catch {
-    // Tenta próximo relay
-  }
-
-  // 4 e 5. AllOrigins Raw e CorsProxy.io
-  const rawProxies = [
-    `https://api.allorigins.win/raw?url=${encodedUrl}`,
-    `https://corsproxy.io/?url=${encodedUrl}`
-  ];
-  for (const proxyUrl of rawProxies) {
-    try {
-      const res = await fetchWithTimeout(proxyUrl, { method: 'GET' }, 8500);
-      if (res.ok) {
-        const xml = await res.text();
-        const items = parseRssXmlItems(xml, feed.label, limit);
-        if (items.length) return items;
-      }
-    } catch {
-      // Tenta próximo relay
-    }
-  }
-
-  return [];
 }
 
 function dedupePortalItems(rawItems = [], maxItems = 40) {
@@ -800,60 +807,109 @@ function dedupePortalItems(rawItems = [], maxItems = 40) {
   return Array.from(seen.values()).slice(0, maxItems);
 }
 
+async function fetchViaAppsScript({ urls = [], labels = [], categoryIds = [], query = '', dateFilter = 'any', driveWebhookUrl = '' }) {
+  if (!driveWebhookUrl) return { items: [], diag: 'no_url', detail: '' };
+  try {
+    const res = await fetchWithTimeout(driveWebhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        action: 'fetch_google_news',
+        query,
+        dateFilter,
+        urls,
+        labels,
+        categoryIds
+      })
+    }, 16000);
+    if (!res.ok) {
+      return { items: [], diag: 'script_error', detail: `Apps Script HTTP ${res.status}` };
+    }
+    const data = await res.json();
+    const errText = [data?.error, ...(Array.isArray(data?.errors) ? data.errors : [])].filter(Boolean).join(' | ');
+    if (data?.needsAuth || /permiss|external_request|UrlFetchApp|autoriz|auth/i.test(errText)) {
+      return { items: [], diag: 'needs_auth', detail: errText };
+    }
+    if (/ação desconhecida|unknown action/i.test(errText)) {
+      return { items: [], diag: 'outdated_deployment', detail: errText };
+    }
+    if (data?.ok && Array.isArray(data.items) && data.items.length) {
+      return {
+        items: data.items.map((it) => ({
+          ...it,
+          publishedAt: it.publishedAt || formatTrendDate(it.pubDate),
+          categoryId: it.categoryId || '',
+          categoryLabel: it.channel || 'Google Notícias'
+        })),
+        diag: 'ok',
+        detail: ''
+      };
+    }
+    if (!data?.version) {
+      return { items: [], diag: 'outdated_deployment', detail: 'Implantação anterior retornou 0 itens.' };
+    }
+    return { items: [], diag: 'script_error', detail: errText || 'Nenhum item retornado.' };
+  } catch (err) {
+    return { items: [], diag: 'script_unreachable', detail: String(err?.message || 'Erro de rede') };
+  }
+}
+
+function throwDetailedRadarError({ rawCount = 0, dateFilter = 'any', appsScriptDiag = '', appsScriptDetail = '' }) {
+  if (rawCount > 0 && dateFilter !== 'any') {
+    throw new Error('Nenhuma notícia encontrada neste período no Google Notícias. Tente ampliar o filtro de data (ex: "Últimas 24 horas" ou "Qualquer data").');
+  }
+  if (appsScriptDiag === 'needs_auth') {
+    throw new Error('Seu Google Apps Script precisa de permissão para acessar o Google Notícias: abra script.google.com, selecione a função "autorizarGoogleNoticias" no menu superior, clique em ▶ Executar uma vez para autorizar e depois faça Implantar → Gerenciar implantações → Editar → Nova versão.');
+  }
+  if (appsScriptDiag === 'outdated_deployment') {
+    throw new Error('Seu Google Apps Script ainda está executando a versão antiga: abra script.google.com, cole o novo google-apps-script.gs v9, execute "autorizarGoogleNoticias" 1x e publique em Implantar → Gerenciar implantações → Editar → Nova versão.');
+  }
+  throw new Error(`Não foi possível acessar as notícias reais do Google Notícias nesta rede agora (${appsScriptDetail || 'proxies RSS públicos indisponíveis'}). Atualize e autorize o Google Apps Script v9 ou tente novamente em instantes.`);
+}
+
 export async function fetchGoogleNewsPortal({ categoryId = 'brasil', subCategoryId = 'todas', focusQuery = '', dateFilter = 'any', driveWebhookUrl = '', onStatus = null } = {}) {
   const { feeds, displayCategoryLabel } = buildGoogleNewsFeedSpecs({ categoryId, subCategoryId, focusQuery, dateFilter });
-
-  if (driveWebhookUrl) {
-    if (typeof onStatus === 'function') onStatus(`Google Notícias (${displayCategoryLabel})...`);
-    try {
-      const res = await fetchWithTimeout(driveWebhookUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify({
-          action: 'fetch_google_news',
-          categoryId,
-          subCategoryId,
-          query: focusQuery,
-          dateFilter,
-          urls: feeds.map((f) => f.url),
-          labels: feeds.map((f) => f.label)
-        })
-      }, 12000);
-      if (res.ok) {
-        const data = await res.json();
-        if (data?.ok && Array.isArray(data.items) && data.items.length) {
-          const normalized = dedupePortalItems(data.items.map((it) => ({
-            ...it,
-            publishedAt: it.publishedAt || formatTrendDate(it.pubDate),
-            categoryLabel: it.channel || displayCategoryLabel
-          })));
-          const filtered = filterNewsByDate(normalized, dateFilter);
-          return {
-            items: filtered,
-            rawCount: normalized.length,
-            fetchedFrom: 'Google Apps Script',
-            categoryId,
-            subCategoryId,
-            displayCategoryLabel,
-            focusQuery,
-            dateFilter
-          };
-        }
-      }
-    } catch {
-      // Apps Script desatualizado ou offline: segue pelos relays no navegador
-    }
-  }
+  const taggedFeeds = feeds.map((f) => ({ ...f, categoryId }));
 
   if (typeof onStatus === 'function') onStatus(`Google Notícias (${displayCategoryLabel})...`);
-  const results = await Promise.allSettled(feeds.map((feed) => fetchSingleRssFeed(feed, 20)));
+
+  const scriptRes = await fetchViaAppsScript({
+    urls: taggedFeeds.map((f) => f.url),
+    labels: taggedFeeds.map((f) => f.label),
+    categoryIds: taggedFeeds.map((f) => f.categoryId),
+    query: focusQuery,
+    dateFilter,
+    driveWebhookUrl
+  });
+
+  if (scriptRes.diag === 'ok' && scriptRes.items.length) {
+    const normalized = dedupePortalItems(scriptRes.items.map((it) => ({
+      ...it,
+      categoryLabel: it.categoryLabel || displayCategoryLabel
+    })));
+    const filtered = filterNewsByDate(normalized, dateFilter);
+    return {
+      items: filtered,
+      rawCount: normalized.length,
+      fetchedFrom: 'Google Apps Script',
+      appsScriptDiag: 'ok',
+      appsScriptDetail: '',
+      categoryId,
+      subCategoryId,
+      displayCategoryLabel,
+      focusQuery,
+      dateFilter
+    };
+  }
+
+  const results = await Promise.allSettled(taggedFeeds.map((feed) => fetchSingleRssFeed(feed, 20)));
   const collected = [];
   results.forEach((res) => {
     if (res.status === 'fulfilled' && Array.isArray(res.value) && res.value.length) {
       res.value.forEach((item) => {
         collected.push({
           ...item,
-          categoryLabel: item.channel || displayCategoryLabel
+          categoryLabel: item.categoryLabel || displayCategoryLabel
         });
       });
     }
@@ -865,11 +921,89 @@ export async function fetchGoogleNewsPortal({ categoryId = 'brasil', subCategory
     items: filtered,
     rawCount: normalized.length,
     fetchedFrom: 'Google News RSS',
+    appsScriptDiag: scriptRes.diag,
+    appsScriptDetail: scriptRes.detail,
     categoryId,
     subCategoryId,
     displayCategoryLabel,
     focusQuery,
     dateFilter
+  };
+}
+
+export async function fetchGoogleNewsAllCategories({ dateFilter = 'any', driveWebhookUrl = '', onStatus = null } = {}) {
+  if (typeof onStatus === 'function') onStatus('Buscando todas as categorias do Google Notícias...');
+
+  const feeds = GOOGLE_NEWS_CATEGORIES.map((cat) => {
+    const topic = cat.topic || (Array.isArray(cat.topics) ? cat.topics[0] : 'NATION');
+    return {
+      categoryId: cat.id,
+      label: cat.label,
+      url: `https://news.google.com/rss/headlines/section/topic/${topic}?hl=pt-BR&gl=BR&ceid=BR:pt`
+    };
+  });
+
+  const byCategory = {};
+  GOOGLE_NEWS_CATEGORIES.forEach((c) => { byCategory[c.id] = []; });
+
+  let rawCollected = [];
+  let fetchedFrom = 'Google News RSS';
+  let appsScriptDiag = 'no_url';
+  let appsScriptDetail = '';
+
+  const scriptRes = await fetchViaAppsScript({
+    urls: feeds.map((f) => f.url),
+    labels: feeds.map((f) => f.label),
+    categoryIds: feeds.map((f) => f.categoryId),
+    dateFilter,
+    driveWebhookUrl
+  });
+  appsScriptDiag = scriptRes.diag;
+  appsScriptDetail = scriptRes.detail;
+
+  if (scriptRes.diag === 'ok' && scriptRes.items.length) {
+    rawCollected = scriptRes.items;
+    fetchedFrom = 'Google Apps Script';
+  } else {
+    const results = await Promise.allSettled(feeds.map((feed) => fetchSingleRssFeed(feed, 12)));
+    results.forEach((res) => {
+      if (res.status === 'fulfilled' && Array.isArray(res.value) && res.value.length) {
+        rawCollected.push(...res.value);
+      }
+    });
+  }
+
+  let rawCount = 0;
+  rawCollected.forEach((item) => {
+    const cid = item.categoryId && byCategory[item.categoryId]
+      ? item.categoryId
+      : (GOOGLE_NEWS_CATEGORIES.find((c) => c.label === item.categoryLabel)?.id || 'brasil');
+    rawCount += 1;
+    byCategory[cid].push({
+      ...item,
+      categoryId: cid,
+      categoryLabel: item.categoryLabel || GOOGLE_NEWS_CATEGORIES.find((c) => c.id === cid)?.label || 'Brasil',
+      publishedAt: item.publishedAt || formatTrendDate(item.pubDate)
+    });
+  });
+
+  Object.keys(byCategory).forEach((cid) => {
+    const deduped = dedupePortalItems(byCategory[cid], 20);
+    byCategory[cid] = filterNewsByDate(deduped, dateFilter);
+  });
+
+  const allItems = dedupePortalItems(
+    GOOGLE_NEWS_CATEGORIES.flatMap((c) => byCategory[c.id] || []),
+    60
+  );
+
+  return {
+    byCategory,
+    allItems,
+    rawCount,
+    fetchedFrom,
+    appsScriptDiag,
+    appsScriptDetail
   };
 }
 
@@ -976,28 +1110,91 @@ export async function searchHotTopics({
   }
 
   const trimmedFocus = String(focusQuery || '').trim();
-  const targetCategory = trimmedFocus ? 'busca' : (categoryId || inferCreatorDefaultCategory(creator));
 
-  const portal = await fetchGoogleNewsPortal({
-    categoryId: targetCategory === 'busca' ? 'brasil' : targetCategory,
-    subCategoryId,
-    focusQuery: trimmedFocus,
+  if (trimmedFocus) {
+    if (typeof onStatus === 'function') onStatus(`Pesquisando "${trimmedFocus}" no Google Notícias...`);
+    const portal = await fetchGoogleNewsPortal({
+      categoryId: 'busca',
+      subCategoryId: 'todas',
+      focusQuery: trimmedFocus,
+      dateFilter,
+      driveWebhookUrl,
+      onStatus: null
+    });
+
+    if (!portal.items.length) {
+      throwDetailedRadarError(portal);
+    }
+
+    const generated = await generateAnglesFromSelectedNews({
+      creator,
+      articles: portal.items,
+      focusQuery: trimmedFocus,
+      count: 5,
+      apiKey,
+      modelName,
+      onStatus
+    });
+
+    const usedLinks = new Set(generated.usedArticleLinks);
+    const remainingArticles = portal.items.filter((it) => !usedLinks.has(it.link));
+
+    const sources = [];
+    const seenUri = new Set();
+    generated.topics.forEach((t) => {
+      if (t.sourceUrl && !seenUri.has(t.sourceUrl)) {
+        seenUri.add(t.sourceUrl);
+        sources.push({
+          title: `${t.trendTitle} (${t.sourceName})`,
+          uri: t.sourceUrl
+        });
+      }
+    });
+
+    return {
+      topics: generated.topics,
+      sources,
+      portalArticles: remainingArticles.length ? remainingArticles : portal.items,
+      allFetchedArticles: portal.items,
+      usedArticleLinks: generated.usedArticleLinks,
+      activeCategory: 'busca',
+      activeSubCategory: 'todas',
+      dateFilter,
+      focusQuery: trimmedFocus,
+      displayCategoryLabel: portal.displayCategoryLabel,
+      generatedBy: `Google Notícias ("${trimmedFocus}") + ${formatModelDisplayName(generated.modelUsed)}`
+    };
+  }
+
+  // Sem pesquisa específica: busca TODAS as 7 categorias do Google Notícias em paralelo
+  const allPortal = await fetchGoogleNewsAllCategories({
     dateFilter,
     driveWebhookUrl,
     onStatus
   });
 
-  if (!portal.items.length) {
-    if (portal.rawCount > 0 && dateFilter !== 'any') {
-      throw new Error('Nenhuma notícia encontrada neste período no Google Notícias. Tente ampliar o filtro de data (ex: "Últimas 24 horas" ou "Qualquer data").');
+  if (!allPortal.allItems.length) {
+    throwDetailedRadarError(allPortal);
+  }
+
+  // Monta pool balanceado com até 4 notícias mais recentes de cada uma das 7 categorias (máx 24)
+  const balancedPool = [];
+  const seenPool = new Set();
+  for (let round = 0; round < 4 && balancedPool.length < 24; round++) {
+    for (const cat of GOOGLE_NEWS_CATEGORIES) {
+      const item = (allPortal.byCategory[cat.id] || [])[round];
+      const key = item?.link || item?.title;
+      if (item && key && !seenPool.has(key) && balancedPool.length < 24) {
+        seenPool.add(key);
+        balancedPool.push(item);
+      }
     }
-    throw new Error('Não foi possível acessar as notícias reais do Google Notícias nesta rede agora. Atualize o Google Apps Script (para buscar pelos servidores do Google) ou desative bloqueadores que barrem proxies RSS.');
   }
 
   const generated = await generateAnglesFromSelectedNews({
     creator,
-    articles: portal.items,
-    focusQuery: trimmedFocus,
+    articles: balancedPool.length ? balancedPool : allPortal.allItems,
+    focusQuery: '',
     count: 5,
     apiKey,
     modelName,
@@ -1005,7 +1202,17 @@ export async function searchHotTopics({
   });
 
   const usedLinks = new Set(generated.usedArticleLinks);
-  const remainingArticles = portal.items.filter((it) => !usedLinks.has(it.link));
+  const portalByCategory = {};
+  GOOGLE_NEWS_CATEGORIES.forEach((cat) => {
+    const list = allPortal.byCategory[cat.id] || [];
+    const remaining = list.filter((it) => !usedLinks.has(it.link));
+    portalByCategory[cat.id] = remaining.length ? remaining : list;
+  });
+
+  const defaultCat = categoryId || inferCreatorDefaultCategory(creator);
+  const defaultArticles = portalByCategory[defaultCat]?.length
+    ? portalByCategory[defaultCat]
+    : allPortal.allItems.filter((it) => !usedLinks.has(it.link));
 
   const sources = [];
   const seenUri = new Set();
@@ -1022,15 +1229,16 @@ export async function searchHotTopics({
   return {
     topics: generated.topics,
     sources,
-    portalArticles: remainingArticles.length ? remainingArticles : portal.items,
-    allFetchedArticles: portal.items,
+    portalByCategory,
+    portalArticles: defaultArticles.length ? defaultArticles : allPortal.allItems,
+    allFetchedArticles: allPortal.allItems,
     usedArticleLinks: generated.usedArticleLinks,
-    activeCategory: targetCategory,
-    activeSubCategory: subCategoryId,
+    activeCategory: defaultCat,
+    activeSubCategory: subCategoryId || 'todas',
     dateFilter,
-    focusQuery: trimmedFocus,
-    displayCategoryLabel: portal.displayCategoryLabel,
-    generatedBy: `Google Notícias (${portal.displayCategoryLabel}) + ${formatModelDisplayName(generated.modelUsed)}`
+    focusQuery: '',
+    displayCategoryLabel: 'Todas as Categorias',
+    generatedBy: `Google Notícias (Todas as Categorias) + ${formatModelDisplayName(generated.modelUsed)}`
   };
 }
 
